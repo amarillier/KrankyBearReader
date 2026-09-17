@@ -1,0 +1,76 @@
+identity:
+    name: KrankyBearReader
+    id: com.github.amarillier.KrankyBearReader
+    version: 0.1.0
+    publisher: Allan Marillier, 2026-
+    vendor: Allan Marillier
+    url: https://github.com/amarillier/KrankyBearReader
+    description: KrankyBear Reader - Cross-platform Fyne based file reader / viewer application
+    license: GPL v3
+    license_file: LICENSE
+    icons:
+        ico: assets/images/KrankyBearReader.ico
+        icns: assets/images/KrankyBearReader.icns
+        png: assets/images/KrankyBearReader.png
+binaries:
+    - os: windows
+      arch: amd64
+      path: bin/KrankyBearReader.exe
+    - os: darwin
+      arch: amd64
+      path: bin/krankybear-reader-macos-amd64
+    - os: darwin
+      arch: arm64
+      path: bin/krankybear-reader-macos-amd64
+    - os: linux
+      arch: amd64
+      path: bin/krankybear-reader-linux-amd64
+    - os: linux
+      arch: arm64
+      path: bin/krankybear-reader-linux-arm64
+payload:
+    - source: assets/i18n
+      dest: assets/i18n
+      recursive: true
+    - source: assets/samples
+      dest: assets/samples
+      recursive: true
+    - source: assets/mesa-win/opengl32.dll
+      dest: mesa-fallback
+      os:
+        - windows
+    - source: assets/mesa-win/libgallium_wgl.dll
+      dest: mesa-fallback
+      os:
+        - windows
+    - source: assets/mesa-win/.force-mesa-fallback.sample
+      dest: mesa-fallback
+      os:
+        - windows
+    - source: ReleaseNotes.md
+      dest: ""
+    - source: '*.yaml'
+      dest: ""
+install:
+    windows: $PROGRAMFILES64\KrankyBearReader
+    macos: /Applications/KrankyBearReader.app
+    linux: /opt/KrankyBearReader
+install_experience:
+    launch_after_install: true
+    desktop_shortcut: true
+windows:
+    upgrade_guid: '{A1F9C38A-728C-4F7D-B7D0-3EFE7CE0B079}'
+    exe_name: KrankyBearReader.exe
+    install_scope: ask
+macos:
+    bundle_executable: KrankyBearReader
+targets:
+    - deb
+    - rpm
+    - macpkg
+    - winexe
+    - winmsi
+output:
+    dir: installers
+    filename_template: '{{.Identity.Name}}_{{.Identity.Version}}_{{.Arch}}'
+    clean_old_versions: true

@@ -1,0 +1,59 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test files
+test/*
+test.log
+test-*.log
+build-log.txt
+bearinstallers/*
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.claude
+
+# git setup stuff
+git.sh
+
+# Update checker data
+latestcheck*.json
+latestcheck.json
+
+## Build artifacts
+bin/*
+installers/*
+assets/
+dist/
+build/
+vendor/*
+*.bat
+*.ps1
+*.sh
+rsrc_windows_amd64.syso
+REUSABLE-DIALOGS-GUIDE.md
+CLAUDE.md
+krankybearreader
+reader
+*.yaml
+github/*
+
+# get-mesa.sh downloads/extracts here — never commit the archive or the DLLs it stages
+mesa-staging/
+
+# ALLOWED
+!assets/*
+Inno/*/
+!winres/*
+get-mesa.sh
+setver.sh
+!installerbear.yaml
+*/.DS_Store
