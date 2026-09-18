@@ -1,0 +1,12 @@
+{
+  "app": "KrankyBear Reader",
+  "welcome": "This is a sample JSON file, opened from Help → Sample Files.",
+  "formatsSupported": ["Text", "JSON", "YAML", "TOML", "Markdown", "CSV", "TSV", "Images"],
+  "tips": {
+    "search": "Use the search box above the tree to filter down to matching keys/values.",
+    "expand": "Expand All / Collapse All toggle the whole tree at once."
+  },
+  "releaseYear": 2026,
+  "stable": true,
+  "codename": null
+}

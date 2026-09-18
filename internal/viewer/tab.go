@@ -25,6 +25,7 @@ type tabData struct {
 	raw    []byte // raw bytes, when available, for the plain-text fallback on err
 
 	structured interface{} // decoded JSON/YAML/TOML
+	xmlRoot    xmlElement  // decoded XML
 	header     []string    // decoded CSV/TSV
 	rows       [][]string
 
@@ -160,6 +161,12 @@ func prepareParsedData(format Format, data []byte) tabData {
 			return tabData{format: format, err: fmt.Errorf("parsing TOML: %w", err), raw: data}
 		}
 		return tabData{format: format, structured: v}
+	case FormatXML:
+		root, err := DecodeXML(data)
+		if err != nil {
+			return tabData{format: format, err: fmt.Errorf("parsing XML: %w", err), raw: data}
+		}
+		return tabData{format: format, xmlRoot: root}
 	case FormatCSV:
 		delim := DetectDelimiter(data)
 		header, rows, err := ParseDelimited(data, delim)
@@ -210,6 +217,8 @@ func buildTabView(win fyne.Window, path string, d tabData) (fyne.CanvasObject, t
 		return handle.Content, tabHooks{close: handle.Close, typedKey: handle.TypedKey}
 	case FormatJSON, FormatYAML, FormatTOML:
 		return NewStructuredTreeView(d.structured), tabHooks{}
+	case FormatXML:
+		return NewXMLTreeView(d.xmlRoot), tabHooks{}
 	case FormatCSV:
 		return NewCSVView(d.header, d.rows), tabHooks{}
 	case FormatMarkdown:

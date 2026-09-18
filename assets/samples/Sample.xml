@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<app name="KrankyBear Reader" stable="true">
+  <welcome>This is a sample XML file, opened from Help &#8594; Sample Files.</welcome>
+  <formatsSupported>
+    <format>Text</format>
+    <format>JSON</format>
+    <format>YAML</format>
+    <format>TOML</format>
+    <format>XML</format>
+    <format>Markdown</format>
+    <format>CSV</format>
+    <format>TSV</format>
+    <format>Images</format>
+  </formatsSupported>
+  <tips>
+    <tip name="search">Use the search box above the tree to filter down to matching tags/attributes/text.</tip>
+    <tip name="expand">Expand All / Collapse All toggle the whole tree at once.</tip>
+    <tip name="attrs">Attributes appear as their own rows, prefixed with @, right under the element they belong to.</tip>
+  </tips>
+  <releaseYear>2026</releaseYear>
+</app>

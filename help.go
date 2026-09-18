@@ -50,6 +50,8 @@ SUPPORTED FORMATS:
 • Text / log files — read-only, selectable, plain text.
 • JSON, YAML, TOML — a searchable, collapsible tree (like
   jsonviewer.stack.hu), with Expand All / Collapse All.
+• XML — the same searchable, collapsible tree, with attributes and text
+  content shown as their own rows (@name, #text) under each element.
 • Markdown — rendered (headings, bold/italic, lists, links, blockquotes).
 • CSV / TSV — a table with a frozen header row; the delimiter is
   auto-detected.
@@ -80,10 +82,11 @@ FIND:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Every format has a find bar: plain text (case-insensitive) or regular
 expressions via the Regex checkbox.
-• CSV filters to matching rows. JSON/YAML/TOML filters the tree to matching
-  keys/values. Text and Markdown jump to each match in turn (Markdown's jump
-  is an approximate scroll position, not exact — the underlying widget has
-  no cursor concept the way the plain-text view does).
+• CSV filters to matching rows. JSON/YAML/TOML/XML filters the tree to
+  matching keys/values (or tags/attributes/text for XML). Text and Markdown
+  jump to each match in turn (Markdown's jump is an approximate scroll
+  position, not exact — the underlying widget has no cursor concept the way
+  the plain-text view does).
 • PDF search is page-level: it jumps to the next/previous page containing a
   match, not to the exact spot on the page.
 

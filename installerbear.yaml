@@ -1,7 +1,7 @@
 identity:
     name: KrankyBearReader
     id: com.github.amarillier.KrankyBearReader
-    version: 0.1.0
+    version: "0.2.0"
     publisher: Allan Marillier, 2026-
     vendor: Allan Marillier
     url: https://github.com/amarillier/KrankyBearReader

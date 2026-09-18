@@ -1,0 +1,11 @@
+Welcome to KrankyBear Reader.
+
+This is a sample plain-text file, opened from Help -> Sample Files. It's
+shown here in a read-only, selectable view -- select and copy text as
+normal, but you can't edit or save changes back to the file.
+
+Open your own files with File -> Open..., by dragging them onto this
+window, or by passing paths on the command line. Each file opens in its
+own tab, and the right viewer (text, JSON/YAML/TOML tree, Markdown, a
+CSV/TSV table, an image viewer, or a hex dump for anything else) is
+chosen automatically.

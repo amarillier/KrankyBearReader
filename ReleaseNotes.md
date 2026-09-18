@@ -11,8 +11,22 @@
   read-only/list-only)
 - A visible highlight box for Text/Markdown find matches (Fyne's Entry/
   RichText widgets have no public API for painting a selection from code)
-- XML tree view (JSON/YAML/TOML already share one; XML's attribute/element/
-  text mix needs its own model)
+
+## Version 0.2.0 - September 18, 2026
+
+### ✨ NEW
+
+- XML viewer: the same searchable, collapsible tree as JSON/YAML/TOML, with
+  attributes (@name) and element text (#text) shown as their own rows
+- PDF: the TOC/Bookmarks/Highlights panel dropdown moved from the far right
+  of the toolbar to the far left, right above where the panel itself opens —
+  quicker to switch between them, with no side-panel width used up while
+  it's hidden
+
+### 🐛 FIXED
+
+- PDF: turning on Continuous Scroll while reading any page but the first no
+  longer jumps back to page 1 — it now stays on the page you were reading
 
 ## Version 0.1.0 - September 17, 2026
 ### ✨ NEW Cross-platform multi-format document reader/viewer

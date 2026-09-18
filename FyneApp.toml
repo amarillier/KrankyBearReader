@@ -2,7 +2,7 @@
 ID = "com.github.amarillier.KrankyBearReader"
 Name = "KrankyBear Reader"
 Creator = "Allan Marillier"
-Version = "0.1.0"
+  Version = "0.2.0"
 Build = 2
 Icon = "KrankyBearReader.png"
 

@@ -3,6 +3,7 @@
 package viewer
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -19,6 +20,7 @@ const (
 	FormatJSON
 	FormatYAML
 	FormatTOML
+	FormatXML
 	FormatMarkdown
 	FormatCSV
 	FormatImage
@@ -34,6 +36,8 @@ func (f Format) String() string {
 		return "YAML"
 	case FormatTOML:
 		return "TOML"
+	case FormatXML:
+		return "XML"
 	case FormatMarkdown:
 		return "Markdown"
 	case FormatCSV:
@@ -57,6 +61,7 @@ var extFormats = map[string]Format{
 	".yaml":     FormatYAML,
 	".yml":      FormatYAML,
 	".toml":     FormatTOML,
+	".xml":      FormatXML,
 	".md":       FormatMarkdown,
 	".markdown": FormatMarkdown,
 	".csv":      FormatCSV,
@@ -107,6 +112,9 @@ func sniffFormat(data []byte) Format {
 		if json.Valid(data) {
 			return FormatJSON
 		}
+		if looksLikeXML(sample) {
+			return FormatXML
+		}
 		return FormatText
 	default:
 		return FormatBinary
@@ -131,6 +139,15 @@ func looksLikeText(sample []byte) bool {
 		}
 	}
 	return float64(nonPrintable)/float64(len(sample)) <= 0.05
+}
+
+// looksLikeXML is a conservative sniff for an extension-less file: it only
+// recognizes an explicit XML declaration ("<?xml ...?>"), not a bare root
+// element, so an HTML file (which typically opens with "<!DOCTYPE html>" or
+// "<html>" and has no such declaration) doesn't get misclassified as XML.
+func looksLikeXML(sample []byte) bool {
+	trimmed := bytes.TrimLeft(sample, " \t\r\n")
+	return bytes.HasPrefix(trimmed, []byte("<?xml"))
 }
 
 // isProbablyText applies looksLikeText's heuristic to an entire file's

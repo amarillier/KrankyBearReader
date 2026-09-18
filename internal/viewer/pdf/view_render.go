@@ -263,7 +263,24 @@ func (v *view) computeRowSize() {
 
 // buildContinuousPages sets up the virtualized continuous-scroll layout:
 // every page gets an empty slot up front, and lazyRenderVisible fills in
-// (and later frees) only the ones near the viewport.
+// (and later frees) only the ones near the viewport. Scrolls straight to
+// v.currentPage rather than leaving the fresh scroll container at its
+// zero-value offset (top of page 1) — confirmed via manual testing that
+// without this, switching Continuous Scroll on while reading any page but
+// the first silently jumped back to page 1.
+//
+// The pagesBox.Resize(MinSize) call below is load-bearing, not cosmetic.
+// Fyne's *container.Scroll.Refresh() always calls refreshBars(), which calls
+// updateOffset(0, 0) — and updateOffset's very first check is `if
+// s.Content.Size() fits within the viewport, force Offset to (0,0)`
+// (internal/widget/scroller.go). A brand-new pagesBox has never been through
+// a layout pass, so Content.Size() reads as the zero value, which always
+// "fits" — so Refresh() silently stomps whatever Offset we just set back to
+// (0,0) before anything is ever painted, regardless of what page we wanted.
+// Resizing pagesBox to its real MinSize first makes Content.Size() already
+// reflect the full multi-page height, so updateOffset takes its normal
+// clamp-in-bounds path instead of its reset-to-zero one, and our offset
+// survives the Refresh() call that follows.
 func (v *view) buildContinuousPages() {
 	n := v.doc.PageCount()
 	if n < 1 {
@@ -281,7 +298,9 @@ func (v *view) buildContinuousPages() {
 		objs[i] = img
 	}
 	v.pagesBox = container.New(v.pagesL, objs...)
+	v.pagesBox.Resize(v.pagesBox.MinSize())
 	v.imageScroll.Content = v.pagesBox
+	v.imageScroll.Offset = fyne.NewPos(0, float32(v.currentPage-1)*v.contRowH)
 	v.imageScroll.Refresh()
 	v.lazyRenderVisible()
 }

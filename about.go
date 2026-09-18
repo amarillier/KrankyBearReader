@@ -51,7 +51,7 @@ func showAbout(a fyne.App) {
 	version.Alignment = fyne.TextAlignCenter
 
 	// Description - customize for your app (placeholder; rename-app.sh won't change it)
-	description := widget.NewLabel("A tabbed, multi-format document reader — text, JSON/YAML/TOML, Markdown, CSV, images, and PDF")
+	description := widget.NewLabel("A tabbed, multi-format document reader — text, JSON/YAML/TOML/XML, Markdown, CSV, images, and PDF")
 	description.Alignment = fyne.TextAlignCenter
 	description.Wrapping = fyne.TextWrapWord
 

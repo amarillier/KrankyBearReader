@@ -19,6 +19,7 @@ var sampleFileNames = []string{
 	"Sample.json",
 	"Sample.yaml",
 	"Sample.toml",
+	"Sample.xml",
 	"Sample.md",
 	"Sample.csv",
 	"Sample.tsv",

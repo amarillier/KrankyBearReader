@@ -177,6 +177,14 @@ func (v *view) buildToolbar() fyne.CanvasObject {
 		v.setContinuous(on)
 	})
 
+	// A single dropdown rather than a persistent row of buttons: picking
+	// "Hide Panel" is what actually closes the split (mainContent.Objects
+	// swaps back to pdfContent alone in setPanelMode), so no side-panel width
+	// is reserved at all while it's hidden — unlike a permanently-visible
+	// button rail, which costs that width whether or not a panel is open.
+	// Placed at the far left of the toolbar (not its original spot at the far
+	// right) so it sits right above where the panel actually opens, keeping
+	// the "quick to reach" win without the "always reserves space" cost.
 	panelSelect := widget.NewSelect([]string{"Hide Panel", "Table of Contents", "Bookmarks", "Highlights and Notes"}, func(s string) {
 		switch s {
 		case "Table of Contents":
@@ -193,8 +201,8 @@ func (v *view) buildToolbar() fyne.CanvasObject {
 	panelSelect.Refresh()
 	v.panelSelectRef = panelSelect
 
-	nav := container.NewHBox(firstBtn, prevBtn, v.pageEntry, v.totalLabel, nextBtn, lastBtn)
-	right := container.NewHBox(v.zoomSelect, continuousCheck, panelSelect)
+	nav := container.NewHBox(panelSelect, firstBtn, prevBtn, v.pageEntry, v.totalLabel, nextBtn, lastBtn)
+	right := container.NewHBox(v.zoomSelect, continuousCheck)
 	return container.NewBorder(nil, nil, nav, right)
 }
 

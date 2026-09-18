@@ -1,0 +1,10 @@
+# Sample TOML file, opened from Help -> Sample Files.
+app = "KrankyBear Reader"
+welcome = "TOML decodes into the same searchable tree view as JSON and YAML."
+formatsSupported = ["Text", "JSON", "YAML", "TOML", "Markdown", "CSV", "TSV", "Images"]
+releaseYear = 2026
+stable = true
+
+[tips]
+search = "Use the search box above the tree to filter down to matching keys/values."
+expand = "Expand All / Collapse All toggle the whole tree at once."

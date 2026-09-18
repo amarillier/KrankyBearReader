@@ -15,6 +15,8 @@ bug fixing and performance work.
   - **Text / log files** — read-only, selectable plain text.
   - **JSON, YAML, TOML** — a searchable, collapsible tree, similar to
     [jsonviewer.stack.hu](https://jsonviewer.stack.hu/).
+  - **XML** — the same searchable, collapsible tree, with attributes and
+    text content shown as their own rows under each element.
   - **Markdown** — rendered (headings, emphasis, lists, links, blockquotes).
   - **CSV / TSV** — a table with a frozen header row and auto-detected
     delimiter.
@@ -27,7 +29,7 @@ bug fixing and performance work.
   - **Anything else** falls back to a hex + ASCII dump rather than refusing
     to open it or mishandling binary content as text.
 - **Find, everywhere** — every viewer has a find bar (plain text or regex):
-  CSV filters rows, JSON/YAML/TOML filters the tree, Text/Markdown jump
+  CSV filters rows, JSON/YAML/TOML/XML filters the tree, Text/Markdown jump
   between matches, and PDF jumps between pages containing a match.
 - **Sample Files** (Help menu) — a quick tour of every supported format.
 - **Recent Files**, drag-and-drop, and command-line file arguments all open

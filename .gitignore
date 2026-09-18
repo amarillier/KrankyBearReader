@@ -7,7 +7,7 @@
 
 # Test files
 test/*
-test.log
+test.
 test-*.log
 build-log.txt
 bearinstallers/*
@@ -31,9 +31,9 @@ latestcheck.json
 ## Build artifacts
 bin/*
 installers/*
-assets/
-dist/
-build/
+assets/*
+dist/*
+build/*
 vendor/*
 *.bat
 *.ps1
@@ -50,7 +50,8 @@ github/*
 mesa-staging/
 
 # ALLOWED
-!assets/*
+!assets/samples
+!assets/i18n
 Inno/*/
 !winres/*
 get-mesa.sh
