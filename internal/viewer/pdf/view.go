@@ -9,6 +9,19 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
+// panelSelectOptions returns the panel-switcher dropdown's option list, with
+// its closed-state entry (index 0) worded for what selecting it would do:
+// "Show Panel" while nothing is open, "Hide Panel" while one already is.
+// Both values fall into setPanelMode's "default" case (PanelNone) — the
+// caller doesn't need to know or care which one is current.
+func panelSelectOptions(panelOpen bool) []string {
+	closedLabel := "Show Panel"
+	if panelOpen {
+		closedLabel = "Hide Panel"
+	}
+	return []string{closedLabel, "Table of Contents", "Bookmarks", "Highlights and Notes"}
+}
+
 // PanelMode selects what the side panel shows.
 type PanelMode int
 
@@ -42,13 +55,17 @@ var zoomOptions = []struct {
 
 // ViewHandle is what NewView hands back to the tab that hosts it: the
 // content to display, an optional Close to release the Document's resources
-// when the tab closes, and an optional TypedKey for page-navigation
-// shortcuts — registered by the caller only while this tab is the selected
-// one (a JSON tab shouldn't page-turn on Space; see manager.go).
+// when the tab closes, an optional TypedKey for page-navigation shortcuts —
+// registered by the caller only while this tab is the selected one (a JSON
+// tab shouldn't page-turn on Space; see manager.go) — and SaveDialog, which
+// opens the same "Save to PDF" dialog as the Bookmarks/TOC panel's own Save
+// button, for a File-menu "Save to PDF..." item to call without needing the
+// panel open first.
 type ViewHandle struct {
-	Content  fyne.CanvasObject
-	Close    func()
-	TypedKey func(*fyne.KeyEvent)
+	Content    fyne.CanvasObject
+	Close      func()
+	TypedKey   func(*fyne.KeyEvent)
+	SaveDialog func()
 }
 
 // view holds all per-tab PDF viewing state. Exactly one is created per open
@@ -96,9 +113,10 @@ func NewView(win fyne.Window, doc *Document) ViewHandle {
 
 	content := v.build()
 	return ViewHandle{
-		Content:  content,
-		Close:    func() { _ = doc.Close() },
-		TypedKey: v.typedKey,
+		Content:    content,
+		Close:      func() { _ = doc.Close() },
+		TypedKey:   v.typedKey,
+		SaveDialog: func() { v.panel.showSaveDialog() },
 	}
 }
 
@@ -177,15 +195,22 @@ func (v *view) buildToolbar() fyne.CanvasObject {
 		v.setContinuous(on)
 	})
 
-	// A single dropdown rather than a persistent row of buttons: picking
-	// "Hide Panel" is what actually closes the split (mainContent.Objects
+	// A single dropdown rather than a persistent row of buttons: picking the
+	// closed option is what actually closes the split (mainContent.Objects
 	// swaps back to pdfContent alone in setPanelMode), so no side-panel width
 	// is reserved at all while it's hidden — unlike a permanently-visible
 	// button rail, which costs that width whether or not a panel is open.
 	// Placed at the far left of the toolbar (not its original spot at the far
 	// right) so it sits right above where the panel actually opens, keeping
 	// the "quick to reach" win without the "always reserves space" cost.
-	panelSelect := widget.NewSelect([]string{"Hide Panel", "Table of Contents", "Bookmarks", "Highlights and Notes"}, func(s string) {
+	//
+	// The closed-state option's own label flips between "Show Panel" and
+	// "Hide Panel" (see setPanelMode) so it always describes what clicking it
+	// does next, rather than statically reading "Hide Panel" even while
+	// nothing is showing to hide. Both labels map to PanelNone here (neither
+	// names a real panel), so the switch below doesn't need to know which one
+	// is currently displayed.
+	panelSelect := widget.NewSelect(panelSelectOptions(false), func(s string) {
 		switch s {
 		case "Table of Contents":
 			v.setPanelMode(PanelTOC)
@@ -197,7 +222,7 @@ func (v *view) buildToolbar() fyne.CanvasObject {
 			v.setPanelMode(PanelNone)
 		}
 	})
-	panelSelect.Selected = "Hide Panel"
+	panelSelect.Selected = "Show Panel"
 	panelSelect.Refresh()
 	v.panelSelectRef = panelSelect
 

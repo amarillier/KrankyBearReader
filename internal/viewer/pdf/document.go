@@ -130,6 +130,13 @@ func (d *Document) RenderPage(page int, zoom float64) (image.Image, error) {
 		return nil, fmt.Errorf("rendering page %d: %w", page, err)
 	}
 
+	// go-fitz's own render (see CLAUDE.md/ReleaseNotes on this) never paints
+	// annotations, highlights included — this is what makes them appear on
+	// the page at all, composited in Go rather than by MuPDF. Baked in before
+	// caching so it only runs once per unique (page, zoom), same as the base
+	// render.
+	d.paintHighlights(img, page, dpi)
+
 	d.cache.Put(key, img)
 	return img, nil
 }

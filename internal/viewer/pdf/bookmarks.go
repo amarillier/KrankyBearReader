@@ -125,6 +125,18 @@ func (bm *BookmarkManager) AddBookmark(title string, pageNo int, yOffset float32
 	return bookmark
 }
 
+// RenameBookmark updates a bookmark/TOC entry's title in place, leaving its
+// page, position, and children untouched — the "just fix the text" edit that
+// doesn't require deleting and re-adding the entry. newTitle must be
+// non-empty (blank titles aren't accepted by AddBookmark's dialog either).
+func (bm *BookmarkManager) RenameBookmark(bookmark *Bookmark, newTitle string) error {
+	if strings.TrimSpace(newTitle) == "" {
+		return fmt.Errorf("title cannot be empty")
+	}
+	bookmark.Title = newTitle
+	return nil
+}
+
 // DeleteBookmark removes a bookmark (searched recursively).
 func (bm *BookmarkManager) DeleteBookmark(bookmark *Bookmark) bool {
 	return deleteBookmarkRecursive(&bm.bookmarks, bookmark)

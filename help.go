@@ -66,17 +66,22 @@ PDF VIEWING:
   level or Fit Width / Fit Page.
 • Table of Contents: the PDF's own outline, if it has one.
 • Bookmarks: add your own (optionally at your exact scroll position, not
-  just the top of the page), then Save to PDF. This writes to the PDF's
-  standard outline, so other readers (Preview, Acrobat, ...) see them too —
-  they'll just appear under their own "Table of Contents", since the
+  just the top of the page), then Save to PDF — also reachable from the File
+  menu (and tray) without opening the panel first. Saving as a new file
+  opens a normal save dialog to pick the exact name and folder; overwriting
+  writes straight back to the original. This writes to the PDF's standard
+  outline, so other readers (Preview, Acrobat, ...) see them too — they'll
+  just appear under their own "Table of Contents", since the
   page-vs-bookmark distinction is this app's own convention, not a PDF
-  standard. Saving with zero entries removes the outline entirely.
+  standard. Saving with zero entries removes the outline entirely. Edit
+  Title renames a selected TOC entry or Bookmark in place (its page/position
+  are left as-is); to change where one points, delete and re-add it instead.
 • Highlights and Notes: lists highlights, underlines, strikeouts, and notes
   already in the PDF (e.g. made in Preview or Acrobat) — tap to jump to that
-  page. Read-only: this app doesn't add or edit highlights, and — a real
-  limitation of the underlying renderer, not a missing checkbox — an
-  existing highlight won't visually paint on the page here the way it does
-  in Preview, only in the list.
+  page. Highlights also paint directly onto the page, tinted with their own
+  color from the PDF when it specifies one. Underlines, strikeouts, and
+  squiggly marks are listed but not yet painted. Read-only: this app doesn't
+  add or edit any of these annotations, only shows what's already there.
 
 FIND:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -98,6 +103,14 @@ Alt+H is the "boss key" equivalent of Hide All Windows from anywhere in the
 app. There's deliberately no matching show-again hotkey — reveal via the
 tray or View menu instead.
 
+STARTUP BEHAVIOR:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+View → Startup Behavior... controls what reopens automatically on launch:
+nothing (the default), just the most recently opened file, or every file
+that was still open when the app last quit. A file passed on the command
+line or dropped onto the app icon at launch always takes precedence over
+this setting.
+
 KEYBOARD SHORTCUTS:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 • Cmd/Ctrl+O - Open a file
@@ -112,8 +125,9 @@ KNOWN LIMITATIONS:
 • PDF region bookmarks (an exact scroll position, not just a page) aren't
   preserved on Save to PDF today — they're saved as page-level bookmarks;
   the position is remembered only for the current session.
-• Highlights/notes are read-only: viewable and listed, not added, edited, or
-  painted onto the rendered page.
+• Highlights/notes are read-only: viewable, listed, and (Highlights only)
+  painted onto the page, but never added or edited from within this app.
+  Underlines, strikeouts, and squiggly marks are listed but not yet painted.
 • Text/Markdown find moves to each match but can't paint a visible
   highlight box around it — a limitation of the underlying text widgets,
   not a missing feature.

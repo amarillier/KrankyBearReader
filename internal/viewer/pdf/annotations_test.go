@@ -25,7 +25,7 @@ func TestFlattenHighlights_SortsByPageAndKeepsOnlyKnownKinds(t *testing.T) {
 		},
 	}
 
-	got := flattenHighlights(pgAnnots)
+	got := flattenHighlights(&model.XRefTable{}, pgAnnots)
 
 	if len(got) != 2 {
 		t.Fatalf("expected 2 highlights (Link excluded), got %d: %+v", len(got), got)
@@ -42,7 +42,7 @@ func TestFlattenHighlights_SortsByPageAndKeepsOnlyKnownKinds(t *testing.T) {
 }
 
 func TestFlattenHighlights_NoAnnotationsReturnsEmpty(t *testing.T) {
-	got := flattenHighlights(map[int]model.PgAnnots{})
+	got := flattenHighlights(&model.XRefTable{}, map[int]model.PgAnnots{})
 	if len(got) != 0 {
 		t.Errorf("expected no highlights, got %d", len(got))
 	}

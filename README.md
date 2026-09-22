@@ -22,10 +22,12 @@ bug fixing and performance work.
     delimiter.
   - **Images** (PNG, JPEG, GIF, BMP, WebP) — fit-to-window or 100% view.
   - **PDF** — continuous-scroll or page-by-page reading, zoom (fixed levels
-    or Fit Width/Page), a Table of Contents panel, Bookmarks you can add and
-    save back into the PDF's standard outline (readable by other PDF apps
-    too), and a Highlights and Notes panel listing annotations already in
-    the file (e.g. from Preview or Acrobat).
+    or Fit Width/Page), a Table of Contents panel, Bookmarks you can add,
+    rename, and save back into the PDF's standard outline (readable by other
+    PDF apps too, and reachable straight from the File menu/tray, not just
+    the panel), and a Highlights and Notes panel listing annotations already
+    in the file (e.g. from Preview or Acrobat) — existing highlights are
+    also painted directly onto the page, in their own color.
   - **Anything else** falls back to a hex + ASCII dump rather than refusing
     to open it or mishandling binary content as text.
 - **Find, everywhere** — every viewer has a find bar (plain text or regex):
@@ -34,6 +36,8 @@ bug fixing and performance work.
 - **Sample Files** (Help menu) — a quick tour of every supported format.
 - **Recent Files**, drag-and-drop, and command-line file arguments all open
   through the same path — no format-specific special casing to open a file.
+- **Startup Behavior** (View menu) — optionally reopen the most recent file,
+  or every file left open at last quit, next time the app launches.
 - **Show All / Hide All Windows**, including an Alt+H boss key, for hiding
   every open window (main + About/Help/Release Notes/Update) at once.
 

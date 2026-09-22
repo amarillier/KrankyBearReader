@@ -2,13 +2,16 @@ package pdf
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
@@ -44,6 +47,8 @@ func (bp *bookmarkPanel) buildUI() {
 		bp.showAddDialog(bp.v.panelMode == PanelTOC)
 	})
 
+	editBtn := widget.NewButton("Edit Title", bp.editSelected)
+
 	deleteBtn := widget.NewButton("Delete Selected", bp.deleteSelected)
 	deleteBtn.Importance = widget.WarningImportance
 
@@ -61,7 +66,7 @@ func (bp *bookmarkPanel) buildUI() {
 	refreshBtn.Importance = widget.LowImportance
 
 	toolbar := container.NewBorder(nil, nil, nil, refreshBtn,
-		container.NewVBox(bp.addBtn, deleteBtn, deleteAllBtn, saveBtn))
+		container.NewVBox(bp.addBtn, editBtn, deleteBtn, deleteAllBtn, saveBtn))
 
 	bp.container = container.NewBorder(toolbar, nil, nil, nil, container.NewScroll(bp.tree))
 }
@@ -160,6 +165,38 @@ func (bp *bookmarkPanel) onSelected(uid string) {
 	bp.v.jumpToPageAndPosition(bookmark.PageNo, bookmark.YOffset)
 }
 
+// editSelected renames the selected entry's title in place — page and
+// position are untouched, unlike delete-and-recreate via showAddDialog.
+// Works for both TOC entries and Bookmarks; the dialog itself doesn't need a
+// mode-specific label the way showAddDialog's does.
+func (bp *bookmarkPanel) editSelected() {
+	bookmark := bp.selected
+	if bookmark == nil {
+		dialog.ShowInformation("No Selection", "Please select an entry to edit", bp.v.win)
+		return
+	}
+
+	titleEntry := widget.NewEntry()
+	titleEntry.SetText(bookmark.Title)
+	form := widget.NewForm(widget.NewFormItem("Title:", titleEntry))
+
+	d := dialog.NewCustomConfirm("Edit Title", "Save", "Cancel", form, func(ok bool) {
+		if !ok {
+			return
+		}
+		if err := bp.v.doc.Bookmarks.RenameBookmark(bookmark, titleEntry.Text); err != nil {
+			dialog.ShowError(err, bp.v.win)
+			return
+		}
+		bp.rebuildTreeData()
+		bp.tree.Refresh()
+	}, bp.v.win)
+
+	d.Resize(fyne.NewSize(400, 150))
+	d.Show()
+	bp.v.win.Canvas().Focus(titleEntry)
+}
+
 func (bp *bookmarkPanel) showAddDialog(toTOC bool) {
 	kind, dlgTitle := "Bookmark", "Add Bookmark"
 	if toTOC {
@@ -229,7 +266,7 @@ func (bp *bookmarkPanel) showAddDialog(toTOC bool) {
 func (bp *bookmarkPanel) showSaveDialog() {
 	empty := !bp.v.doc.Bookmarks.HasBookmarks()
 
-	const optNew = "Save as a new file (\u2026-bookmarked.pdf)"
+	const optNew = "Save as a new file..."
 	const optOverwrite = "Overwrite the original file"
 	choice := widget.NewRadioGroup([]string{optNew, optOverwrite}, nil)
 	choice.SetSelected(optNew)
@@ -244,24 +281,57 @@ func (bp *bookmarkPanel) showSaveDialog() {
 		if !ok {
 			return
 		}
-		overwrite := choice.Selected == optOverwrite
-		outputPath := bp.v.doc.Path() + "-bookmarked.pdf"
-		if overwrite {
-			outputPath = bp.v.doc.Path()
-		}
-		if err := bp.v.doc.Bookmarks.SaveBookmarks(outputPath); err != nil {
-			dialog.ShowError(fmt.Errorf("failed to save: %w", err), bp.v.win)
+		if choice.Selected == optOverwrite {
+			bp.saveBookmarksTo(bp.v.doc.Path())
 			return
 		}
-		verb := "Saved to"
-		if empty {
-			verb = "Removed all entries; saved to"
-		}
-		bp.showTransientInfo("Success", fmt.Sprintf("%s:\n%s", verb, outputPath))
+		bp.showSaveAsDialog()
 	}, bp.v.win)
 
 	d.Resize(fyne.NewSize(460, 220))
 	d.Show()
+}
+
+// showSaveAsDialog lets the user pick the exact destination file and folder
+// for a new bookmarked copy, rather than always suffixing "-bookmarked" onto
+// the original name in its own folder — pre-filled with that as a starting
+// point, but changeable.
+func (bp *bookmarkPanel) showSaveAsDialog() {
+	origPath := bp.v.doc.Path()
+	dir := filepath.Dir(origPath)
+	base := strings.TrimSuffix(filepath.Base(origPath), filepath.Ext(origPath))
+
+	fd := dialog.NewFileSave(func(w fyne.URIWriteCloser, err error) {
+		if err != nil {
+			dialog.ShowError(err, bp.v.win)
+			return
+		}
+		if w == nil {
+			return // user cancelled
+		}
+		path := w.URI().Path()
+		w.Close()
+		bp.saveBookmarksTo(path)
+	}, bp.v.win)
+
+	fd.SetFileName(base + "-bookmarked.pdf")
+	if lister, err := storage.ListerForURI(storage.NewFileURI(dir)); err == nil {
+		fd.SetLocation(lister)
+	}
+	fd.Show()
+}
+
+func (bp *bookmarkPanel) saveBookmarksTo(outputPath string) {
+	empty := !bp.v.doc.Bookmarks.HasBookmarks()
+	if err := bp.v.doc.Bookmarks.SaveBookmarks(outputPath); err != nil {
+		dialog.ShowError(fmt.Errorf("failed to save: %w", err), bp.v.win)
+		return
+	}
+	verb := "Saved to"
+	if empty {
+		verb = "Removed all entries; saved to"
+	}
+	bp.showTransientInfo("Success", fmt.Sprintf("%s:\n%s", verb, outputPath))
 }
 
 func (bp *bookmarkPanel) showTransientInfo(title, msg string) {

@@ -21,7 +21,7 @@ import (
 
 const (
 	// appName    = "KrankyBear Reader"
-	appVersion = "0.2.0" // see FyneApp.toml
+	appVersion = "0.3.0" // see FyneApp.toml
 	appAuthor  = "Allan Marillier"
 	appID      = "com.github.amarillier.KrankyBearReader"
 )
@@ -90,10 +90,16 @@ func main() {
 	// clean loop iteration outside whatever callback triggered it — quitting
 	// directly from inside a menu-item click or close-intercept callback can hang
 	// on Windows (see CLAUDE.md "Quitting cleanly").
-	win.SetCloseIntercept(func() { fyne.Do(func() { quitApp(a, win) }) })
+	win.SetCloseIntercept(func() { fyne.Do(func() { quitApp(a, win, manager) }) })
 
 	checkForUpdatesAuto(a) // quiet, once-per-day check; dialog only if an update exists
 
+	// Command-line/drag-launched files take precedence over the startup
+	// preference — reopening last session's tabs on top of an explicit
+	// "open this file" launch would be surprising, not helpful.
+	if len(os.Args) == 1 {
+		openStartupFiles(a, manager)
+	}
 	for _, path := range os.Args[1:] {
 		if err := manager.OpenFile(path); err != nil {
 			dialog.ShowError(fmt.Errorf("failed to open %s: %w", filepath.Base(path), err), win)
@@ -137,9 +143,11 @@ func saveMainWindowGeometry(a fyne.App, win fyne.Window) {
 
 // quitApp does teardown in the order CLAUDE.md calls out: stop background work
 // first (none yet in this bare template — add tickers/players above this call
-// as the app grows), then persist geometry, then quit.
-func quitApp(a fyne.App, win fyne.Window) {
+// as the app grows), then persist geometry and the open-files snapshot (for
+// the "reopen everything from last time" startup preference), then quit.
+func quitApp(a fyne.App, win fyne.Window, manager *viewer.Manager) {
 	saveMainWindowGeometry(a, win)
+	manager.SaveOpenFilesForNextLaunch()
 	a.Quit()
 }
 
@@ -150,12 +158,15 @@ func buildMenu(a fyne.App, win fyne.Window, manager *viewer.Manager) *fyne.MainM
 		fyne.NewMenuItem("Open...", func() { manager.OpenDialog() }),
 		fyne.NewMenuItem("Open Recent...", func() { showRecentDialog(win, manager) }),
 		fyne.NewMenuItem("Close Tab", func() { manager.CloseCurrentTab() }),
+		fyne.NewMenuItem("Save to PDF...", func() { saveCurrentTabToPDF(win, manager) }),
 		fyne.NewMenuItemSeparator(),
-		fyne.NewMenuItem("Quit", func() { fyne.Do(func() { quitApp(a, win) }) }),
+		fyne.NewMenuItem("Quit", func() { fyne.Do(func() { quitApp(a, win, manager) }) }),
 	)
 	viewMenu := fyne.NewMenu("View",
 		fyne.NewMenuItem("Show All Windows", func() { showAllWindows(); win.RequestFocus() }),
 		fyne.NewMenuItem("Hide All Windows", func() { hideAllWindows() }),
+		fyne.NewMenuItemSeparator(),
+		fyne.NewMenuItem("Startup Behavior...", func() { showStartupPreferenceDialog(a, win) }),
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("Light Theme", func() { setLightTheme(a) }),
 		fyne.NewMenuItem("Dark Theme", func() { setDarkTheme(a) }),
@@ -191,6 +202,9 @@ func setupSystemTray(a fyne.App, win fyne.Window, manager *viewer.Manager) {
 		fyne.NewMenuItem("Open...", func() { fyne.Do(func() { win.Show(); win.RequestFocus(); manager.OpenDialog() }) }),
 		fyne.NewMenuItem("Open Recent...", func() { fyne.Do(func() { win.Show(); win.RequestFocus(); showRecentDialog(win, manager) }) }),
 		fyne.NewMenuItem("Close Tab", func() { fyne.Do(func() { manager.CloseCurrentTab() }) }),
+		fyne.NewMenuItem("Save to PDF...", func() { fyne.Do(func() { win.Show(); win.RequestFocus(); saveCurrentTabToPDF(win, manager) }) }),
+		fyne.NewMenuItemSeparator(),
+		fyne.NewMenuItem("Startup Behavior...", func() { fyne.Do(func() { win.Show(); win.RequestFocus(); showStartupPreferenceDialog(a, win) }) }),
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("Light Theme", func() { fyne.Do(func() { setLightTheme(a) }) }),
 		fyne.NewMenuItem("Dark Theme", func() { fyne.Do(func() { setDarkTheme(a) }) }),
@@ -206,7 +220,7 @@ func setupSystemTray(a fyne.App, win fyne.Window, manager *viewer.Manager) {
 		fyne.NewMenuItem("Check for Updates", func() { checkForUpdatesManual(a) }),
 		fyne.NewMenuItem("About", func() { fyne.Do(func() { showAbout(a) }) }),
 		fyne.NewMenuItemSeparator(),
-		fyne.NewMenuItem("Quit", func() { fyne.Do(func() { quitApp(a, win) }) }),
+		fyne.NewMenuItem("Quit", func() { fyne.Do(func() { quitApp(a, win, manager) }) }),
 	)
 	menu := fyne.NewMenu(appName, trayItems...)
 	desk.SetSystemTrayMenu(menu)
@@ -221,6 +235,89 @@ func setupSystemTray(a fyne.App, win fyne.Window, manager *viewer.Manager) {
 	time.AfterFunc(300*time.Millisecond, func() {
 		systray.SetTooltip(appName)
 	})
+}
+
+// saveCurrentTabToPDF is the File-menu/tray "Save to PDF..." action: it
+// reaches whichever tab is currently selected without the user needing to
+// open that PDF's Bookmarks/TOC panel first. Only a PDF tab has anything to
+// save, so anything else gets a one-line explanation instead of doing
+// nothing silently — the user just clicked Save, so they get told why
+// nothing happened, unlike CloseCurrentTab's silent no-selection guard.
+func saveCurrentTabToPDF(win fyne.Window, manager *viewer.Manager) {
+	if !manager.CanSaveCurrentTab() {
+		dialog.ShowInformation("Save to PDF", "Select a PDF tab first to save its bookmarks/TOC.", win)
+		return
+	}
+	manager.SaveCurrentTab()
+}
+
+// ── Startup behavior preference ──────────────────────────────────────────────
+// What to reopen automatically on launch: nothing (default), just the most
+// recently opened file, or every file that was still open at last quit.
+// Command-line/drag-launched files always take precedence (see main()).
+
+const (
+	prefStartupMode     = "reader.startupMode"
+	startupModeNone     = "none"
+	startupModeLastFile = "last"
+	startupModeAllFiles = "all"
+)
+
+// openStartupFiles applies the startup preference. Errors (e.g. a file
+// that's since been moved or deleted) are swallowed rather than shown: this
+// runs on every launch, and nagging the user with a dialog every single time
+// until they manually clear the stale entry would be worse than just not
+// reopening it.
+func openStartupFiles(a fyne.App, manager *viewer.Manager) {
+	switch a.Preferences().StringWithFallback(prefStartupMode, startupModeNone) {
+	case startupModeLastFile:
+		if recent := manager.RecentFiles(); len(recent) > 0 {
+			_ = manager.OpenFile(recent[0])
+		}
+	case startupModeAllFiles:
+		for _, p := range manager.FilesOpenAtLastQuit() {
+			_ = manager.OpenFile(p)
+		}
+	}
+}
+
+// showStartupPreferenceDialog lets the user choose the startup behavior
+// above. Modeled on the same RadioGroup-in-a-CustomConfirm pattern used by
+// the PDF Bookmarks panel's own Save dialog.
+func showStartupPreferenceDialog(a fyne.App, win fyne.Window) {
+	const (
+		optNone = "Don't reopen anything"
+		optLast = "Reopen the most recently opened file"
+		optAll  = "Reopen every file that was open at last quit"
+	)
+
+	selected := optNone
+	switch a.Preferences().StringWithFallback(prefStartupMode, startupModeNone) {
+	case startupModeLastFile:
+		selected = optLast
+	case startupModeAllFiles:
+		selected = optAll
+	}
+
+	choice := widget.NewRadioGroup([]string{optNone, optLast, optAll}, nil)
+	choice.SetSelected(selected)
+	content := container.NewVBox(widget.NewLabel("When KrankyBear Reader launches:"), choice)
+
+	d := dialog.NewCustomConfirm("Startup Behavior", "Save", "Cancel", content, func(ok bool) {
+		if !ok {
+			return
+		}
+		switch choice.Selected {
+		case optLast:
+			a.Preferences().SetString(prefStartupMode, startupModeLastFile)
+		case optAll:
+			a.Preferences().SetString(prefStartupMode, startupModeAllFiles)
+		default:
+			a.Preferences().SetString(prefStartupMode, startupModeNone)
+		}
+	}, win)
+	d.Resize(fyne.NewSize(420, 220))
+	d.Show()
 }
 
 // showRecentDialog lists recently opened files (read fresh from preferences

@@ -15,6 +15,14 @@ import (
 const (
 	prefRecentFiles = "reader.recentFiles"
 	maxRecentFiles  = 15
+
+	// prefOpenAtQuit stores exactly which files were open (in tab order) when
+	// the app last quit — distinct from prefRecentFiles' capped MRU history,
+	// which doesn't reflect what's still open now, only what was opened at
+	// some point. Read by a "reopen all files from last time" startup
+	// preference (see main.go); written by SaveOpenFilesForNextLaunch, called
+	// from quitApp before the window/tabs are torn down.
+	prefOpenAtQuit = "reader.openFilesAtQuit"
 )
 
 // Manager owns the tabbed document area: opening files (from the menu, tray,
@@ -30,6 +38,7 @@ type Manager struct {
 	root        *fyne.Container
 
 	openPaths map[string]*container.TabItem
+	itemPaths map[*container.TabItem]string
 	records   map[*container.TabItem]*tabRecord
 	lastDir   fyne.ListableURI
 }
@@ -38,8 +47,9 @@ type Manager struct {
 // the tab's own *container.TabItem so both close-on-tab-close and
 // typedKey-on-selected-tab dispatch can find them.
 type tabRecord struct {
-	close    func()
-	typedKey func(*fyne.KeyEvent)
+	close      func()
+	typedKey   func(*fyne.KeyEvent)
+	saveDialog func()
 }
 
 // NewManager creates a Manager. Call Build to get the content for
@@ -49,6 +59,7 @@ func NewManager(win fyne.Window, a fyne.App) *Manager {
 		app:       a,
 		win:       win,
 		openPaths: map[string]*container.TabItem{},
+		itemPaths: map[*container.TabItem]string{},
 		records:   map[*container.TabItem]*tabRecord{},
 	}
 }
@@ -78,6 +89,7 @@ func (m *Manager) forgetTab(item *container.TabItem) {
 		}
 		delete(m.records, item)
 	}
+	delete(m.itemPaths, item)
 	for p, it := range m.openPaths {
 		if it == item {
 			delete(m.openPaths, p)
@@ -113,9 +125,10 @@ func (m *Manager) OpenFile(path string) error {
 
 	item := &container.TabItem{Text: filepath.Base(path)}
 	item.Content = newTabContent(m.win, path, format, func(hooks tabHooks) {
-		m.records[item] = &tabRecord{close: hooks.close, typedKey: hooks.typedKey}
+		m.records[item] = &tabRecord{close: hooks.close, typedKey: hooks.typedKey, saveDialog: hooks.saveDialog}
 	})
 	m.openPaths[path] = item
+	m.itemPaths[item] = path
 
 	m.tabs.Append(item)
 	m.tabs.Select(item)
@@ -165,6 +178,32 @@ func (m *Manager) CloseCurrentTab() {
 	m.refreshRoot()
 }
 
+// CanSaveCurrentTab reports whether the selected tab supports "Save to
+// PDF..." (only a PDF tab does) — for a File-menu item to check before
+// bothering to call SaveCurrentTab, e.g. to show a more specific message
+// than SaveCurrentTab's own generic fallback.
+func (m *Manager) CanSaveCurrentTab() bool {
+	item := m.tabs.Selected()
+	if item == nil {
+		return false
+	}
+	rec, ok := m.records[item]
+	return ok && rec.saveDialog != nil
+}
+
+// SaveCurrentTab opens the selected tab's "Save to PDF" dialog, if it has
+// one. Silently does nothing otherwise — callers that want to tell the user
+// why should check CanSaveCurrentTab first.
+func (m *Manager) SaveCurrentTab() {
+	item := m.tabs.Selected()
+	if item == nil {
+		return
+	}
+	if rec, ok := m.records[item]; ok && rec.saveDialog != nil {
+		rec.saveDialog()
+	}
+}
+
 // RecentFiles returns recently opened paths, most-recent-first.
 func (m *Manager) RecentFiles() []string {
 	return m.app.Preferences().StringList(prefRecentFiles)
@@ -188,6 +227,33 @@ func (m *Manager) addRecent(path string) {
 		updated = updated[:maxRecentFiles]
 	}
 	m.app.Preferences().SetStringList(prefRecentFiles, updated)
+}
+
+// OpenPaths returns the paths of every currently open tab, in left-to-right
+// tab order — the exact working set, unlike RecentFiles' capped MRU history
+// (which includes files no longer open, and drops anything past
+// maxRecentFiles).
+func (m *Manager) OpenPaths() []string {
+	paths := make([]string, 0, len(m.tabs.Items))
+	for _, item := range m.tabs.Items {
+		if p, ok := m.itemPaths[item]; ok {
+			paths = append(paths, p)
+		}
+	}
+	return paths
+}
+
+// SaveOpenFilesForNextLaunch persists OpenPaths so a "reopen everything from
+// last time" startup preference (see main.go) can restore this exact set.
+// Called from quitApp, before the window/tabs are torn down.
+func (m *Manager) SaveOpenFilesForNextLaunch() {
+	m.app.Preferences().SetStringList(prefOpenAtQuit, m.OpenPaths())
+}
+
+// FilesOpenAtLastQuit returns whatever SaveOpenFilesForNextLaunch last saved
+// (empty on a first-ever launch, or if nothing was open at last quit).
+func (m *Manager) FilesOpenAtLastQuit() []string {
+	return m.app.Preferences().StringList(prefOpenAtQuit)
 }
 
 // setupShortcuts registers Ctrl/Cmd+O (open) and Ctrl/Cmd+W (close tab) on the

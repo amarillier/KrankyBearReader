@@ -402,6 +402,9 @@ func (v *view) setPanelMode(mode PanelMode) {
 	// same-value guard) — since this method IS that OnChanged handler for
 	// panelSelect, calling SetSelected here recurses into itself forever.
 	// Same fix, same reasoning as buildToolbar's initial zoom/panel value.
+	// SetOptions itself doesn't touch .Selected or fire OnChanged, so it's
+	// safe to call before setting .Selected below.
+	v.panelSelectRef.SetOptions(panelSelectOptions(mode != PanelNone))
 	switch mode {
 	case PanelTOC:
 		v.panelSelectRef.Selected = "Table of Contents"
@@ -410,7 +413,7 @@ func (v *view) setPanelMode(mode PanelMode) {
 	case PanelHighlights:
 		v.panelSelectRef.Selected = "Highlights and Notes"
 	default:
-		v.panelSelectRef.Selected = "Hide Panel"
+		v.panelSelectRef.Selected = "Show Panel"
 	}
 	v.panelSelectRef.Refresh()
 	if mode == PanelTOC || mode == PanelBookmarks {

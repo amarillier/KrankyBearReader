@@ -40,13 +40,16 @@ type tabData struct {
 // tabHooks are the optional per-tab behaviors a format's view can provide
 // beyond its content, extracted by manager.go once a tab finishes loading:
 // Close releases resources when the tab closes (only PDF tabs need this
-// today — a persistent *fitz.Document per open tab), and TypedKey handles
+// today — a persistent *fitz.Document per open tab), TypedKey handles
 // page-navigation-style keys while this tab is the one currently selected
 // (so e.g. Space/PageDown page-turn a PDF but don't do anything unexpected
-// in a JSON or CSV tab).
+// in a JSON or CSV tab), and saveDialog (PDF only) opens the "Save to PDF"
+// dialog, for the File menu's "Save to PDF..." item to reach without the
+// Bookmarks/TOC panel already being open.
 type tabHooks struct {
-	close    func()
-	typedKey func(*fyne.KeyEvent)
+	close      func()
+	typedKey   func(*fyne.KeyEvent)
+	saveDialog func()
 }
 
 // newTabContent returns the CanvasObject to use as a tab's Content: a loading
@@ -214,7 +217,7 @@ func buildTabView(win fyne.Window, path string, d tabData) (fyne.CanvasObject, t
 		return NewHexView(d.hexSample, d.hexTotal), tabHooks{}
 	case FormatPDF:
 		handle := pdf.NewView(win, d.pdfDoc)
-		return handle.Content, tabHooks{close: handle.Close, typedKey: handle.TypedKey}
+		return handle.Content, tabHooks{close: handle.Close, typedKey: handle.TypedKey, saveDialog: handle.SaveDialog}
 	case FormatJSON, FormatYAML, FormatTOML:
 		return NewStructuredTreeView(d.structured), tabHooks{}
 	case FormatXML:
