@@ -1,6 +1,7 @@
 package viewer
 
 import (
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 
@@ -23,6 +24,16 @@ const (
 	// preference (see main.go); written by SaveOpenFilesForNextLaunch, called
 	// from quitApp before the window/tabs are torn down.
 	prefOpenAtQuit = "reader.openFilesAtQuit"
+
+	// prefLastPage stores a JSON-encoded map[string]int of file path -> the
+	// last page viewed there, so reopening a file (Recent Files, drag-drop,
+	// command line, or Startup Behavior's own auto-reopen — all funnel
+	// through OpenFile) lands back where the user left off instead of
+	// always at page 1. A single JSON blob rather than one preference key
+	// per file: Fyne's Preferences has no native map type, and one key per
+	// path would leak forever as files came and went, with no natural place
+	// to prune them.
+	prefLastPage = "reader.lastPage"
 )
 
 // Manager owns the tabbed document area: opening files (from the menu, tray,
@@ -124,7 +135,9 @@ func (m *Manager) OpenFile(path string) error {
 	}
 
 	item := &container.TabItem{Text: filepath.Base(path)}
-	item.Content = newTabContent(m.win, path, format, func(hooks tabHooks) {
+	initialPage := m.lastPageFor(path)
+	onPageChanged := func(page int) { m.setLastPage(path, page) }
+	item.Content = newTabContent(m.win, path, format, initialPage, onPageChanged, func(hooks tabHooks) {
 		m.records[item] = &tabRecord{close: hooks.close, typedKey: hooks.typedKey, saveDialog: hooks.saveDialog}
 	})
 	m.openPaths[path] = item
@@ -227,6 +240,39 @@ func (m *Manager) addRecent(path string) {
 		updated = updated[:maxRecentFiles]
 	}
 	m.app.Preferences().SetStringList(prefRecentFiles, updated)
+}
+
+// lastPageFor returns the last-viewed page recorded for path, or 1 if
+// there's no record (a first-ever open, a file predating this feature, or
+// a corrupt/foreign preference value — never worth failing the open over).
+func (m *Manager) lastPageFor(path string) int {
+	pages := m.readLastPages()
+	if p, ok := pages[path]; ok && p > 0 {
+		return p
+	}
+	return 1
+}
+
+// setLastPage records path's current page, overwriting whatever was there.
+// Called on every page change (see pdf.NewView's onPageChanged) — cheap
+// enough (a small JSON blob) that there's no need to throttle it.
+func (m *Manager) setLastPage(path string, page int) {
+	pages := m.readLastPages()
+	pages[path] = page
+	b, err := json.Marshal(pages)
+	if err != nil {
+		return
+	}
+	m.app.Preferences().SetString(prefLastPage, string(b))
+}
+
+func (m *Manager) readLastPages() map[string]int {
+	pages := map[string]int{}
+	raw := m.app.Preferences().String(prefLastPage)
+	if raw != "" {
+		_ = json.Unmarshal([]byte(raw), &pages) // corrupt/foreign value -> treat as empty
+	}
+	return pages
 }
 
 // OpenPaths returns the paths of every currently open tab, in left-to-right

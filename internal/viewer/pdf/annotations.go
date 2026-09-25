@@ -15,13 +15,28 @@ import (
 // Highlight is one PDF annotation worth surfacing in the Highlights and
 // Notes panel: a highlight/underline/strikeout/squiggly markup, or a
 // text/popup note. Link annotations are deliberately excluded — they aren't
-// "highlights or notes". This app doesn't author new annotations, only lists
-// and (for Highlight specifically — see Quads) paints what other apps
-// (Preview, Acrobat, ...) already wrote.
+// "highlights or notes". This app lists and (for Highlight specifically —
+// see Quads) paints what other apps (Preview, Acrobat, ...) already wrote;
+// it can also caption, add, and delete Highlight-kind ones itself — see
+// highlight_edit.go — but doesn't yet author Underline/Strikeout/Squiggly
+// geometry, and new Highlight geometry comes from a hand-drawn rectangle,
+// not text-snapped selection like Preview/Acrobat's (go-fitz has no word/
+// line bounding-box API — see ReleaseNotes' Future ideas).
 type Highlight struct {
 	Page     int
 	Kind     string
 	Contents string
+
+	// ObjNr is this annotation's PDF indirect object number, captured at
+	// load time. SaveHighlights re-dereferences the annotation by this
+	// number to write a caption back onto exactly this one, the same way
+	// highlightGeometry re-dereferences it to read Quads/Color back. Zero
+	// means this Highlight only exists in memory so far — either the rare
+	// on-disk annotation with no indirect reference of its own (see
+	// highlightGeometry), where captioning is a no-op on save, or (far more
+	// commonly) one just added via AddHighlight and not yet saved, which
+	// SaveHighlights creates as a new annotation instead of updating one.
+	ObjNr int
 
 	// Quads and Color are populated for Kind == "Highlight" only (Underline/
 	// Strikeout/Squiggly/Note painting is a possible future step, not
@@ -89,8 +104,9 @@ func flattenHighlights(xRefTable *model.XRefTable, pgAnnots map[int]model.PgAnno
 			}
 			for objNr, a := range annot.Map {
 				h := &Highlight{
-					Page: page,
-					Kind: label,
+					Page:  page,
+					Kind:  label,
+					ObjNr: objNr,
 					// Content(), not ContentString(): MarkupAnnotation
 					// overrides ContentString() to wrap the text in literal
 					// quotes for CLI/debug display (confirmed by reading
@@ -209,11 +225,11 @@ func (d *Document) paintHighlights(img *image.RGBA, page int, dpi float64) {
 			continue
 		}
 		if !haveBounds {
-			bounds, err := d.doc.Bound(page - 1) // go-fitz is 0-based
+			_, height, err := d.PageBoundsPt(page)
 			if err != nil {
 				return
 			}
-			pageHeightPt = float64(bounds.Dy())
+			pageHeightPt = height
 			haveBounds = true
 		}
 		col := color.NRGBA{
@@ -223,8 +239,82 @@ func (d *Document) paintHighlights(img *image.RGBA, page int, dpi float64) {
 			A: highlightOverlayAlpha,
 		}
 		for _, q := range h.Quads {
-			drawTranslucentRect(img, quadPixelRect(q, pageHeightPt, scale), col)
+			r := quadPixelRect(q, pageHeightPt, scale)
+			drawTranslucentRect(img, r, col)
+			if h == d.selectedHighlight {
+				drawRectOutline(img, r, selectionOutlineColor, selectionOutlineWidth)
+			}
 		}
+	}
+}
+
+// SetSelectedHighlight marks h (nil to clear) as the one paintHighlights
+// outlines distinctly, matching the Highlights panel's own selection.
+// Clears the render cache so both the previously- and newly-selected
+// highlight's pages repaint with the change — the caller (highlightsPanel's
+// list.OnSelected) is responsible for actually forcing those specific
+// pages to re-render (view.repaintPage), the same way AddHighlight/
+// DeleteHighlight/SetHighlightColor leave that to their callers too.
+func (d *Document) SetSelectedHighlight(h *Highlight) {
+	if d.selectedHighlight == h {
+		return
+	}
+	d.selectedHighlight = h
+	d.cache.Clear()
+}
+
+// HighlightAt returns the Highlight-kind highlight on page whose bounding
+// box contains the PDF-space point (x, y — origin bottom-left, same
+// convention as Highlight.Quads), or nil. Used to click-select a highlight
+// directly on the page (see view.handleHighlightTapped), the reverse of
+// selecting it in the Highlights panel's list. Kind != "Highlight" entries
+// are skipped the same way paintHighlights skips them: they have no Quads.
+//
+// When multiple highlights overlap, returns the last match in
+// d.Highlights (iterated in reverse) — paintHighlights draws the list in
+// order, so the last one drawn is the topmost one visually, and that's the
+// one a click should hit first.
+func (d *Document) HighlightAt(page int, x, y float64) *Highlight {
+	for i := len(d.Highlights) - 1; i >= 0; i-- {
+		h := d.Highlights[i]
+		if h.Page != page {
+			continue
+		}
+		for _, q := range h.Quads {
+			minX, minY, maxX, maxY := quadBoundsPt(q)
+			if x >= minX && x <= maxX && y >= minY && y <= maxY {
+				return h
+			}
+		}
+	}
+	return nil
+}
+
+// selectionOutlineColor/Width mark the currently-selected highlight (see
+// SetSelectedHighlight) with a solid border on top of its usual translucent
+// fill, so which row is selected in the Highlights panel is visible on the
+// page too, not just in the list.
+var selectionOutlineColor = color.NRGBA{R: 0, G: 120, B: 255, A: 255}
+
+const selectionOutlineWidth = 3
+
+// drawRectOutline draws a solid border of the given width just inside r's
+// edges — four filled strips rather than a general stroke primitive, which
+// is all a purely axis-aligned rectangle (see quadPixelRect's own doc
+// comment on why quads are treated as axis-aligned) ever needs.
+func drawRectOutline(img *image.RGBA, r image.Rectangle, col color.NRGBA, width int) {
+	r = r.Intersect(img.Bounds())
+	if r.Empty() {
+		return
+	}
+	sides := [4]image.Rectangle{
+		image.Rect(r.Min.X, r.Min.Y, r.Max.X, r.Min.Y+width), // top
+		image.Rect(r.Min.X, r.Max.Y-width, r.Max.X, r.Max.Y), // bottom
+		image.Rect(r.Min.X, r.Min.Y, r.Min.X+width, r.Max.Y), // left
+		image.Rect(r.Max.X-width, r.Min.Y, r.Max.X, r.Max.Y), // right
+	}
+	for _, side := range sides {
+		draw.Draw(img, side.Intersect(img.Bounds()), image.NewUniform(col), image.Point{}, draw.Over)
 	}
 }
 
@@ -236,17 +326,27 @@ func (d *Document) paintHighlights(img *image.RGBA, page int, dpi float64) {
 // text), so this is exact for the common case and a reasonable approximation
 // for the rare rotated one, without needing a general polygon rasterizer.
 func quadPixelRect(q [8]float64, pageHeightPt, scale float64) image.Rectangle {
-	minX, maxX := q[0], q[0]
-	minY, maxY := q[1], q[1]
+	minX, minY, maxX, maxY := quadBoundsPt(q)
+	return image.Rect(
+		int(minX*scale), int((pageHeightPt-maxY)*scale),
+		int(maxX*scale), int((pageHeightPt-minY)*scale),
+	)
+}
+
+// quadBoundsPt returns q's axis-aligned bounding box in PDF user-space
+// points — the same "use the bounding box, not the 4 points as a polygon"
+// simplification quadPixelRect's own doc comment explains, factored out so
+// SaveHighlights' write path (turning a drawn rectangle back into
+// /QuadPoints) can share it instead of re-deriving the same min/max.
+func quadBoundsPt(q [8]float64) (minX, minY, maxX, maxY float64) {
+	minX, maxX = q[0], q[0]
+	minY, maxY = q[1], q[1]
 	for i := 1; i < 4; i++ {
 		x, y := q[i*2], q[i*2+1]
 		minX, maxX = min(minX, x), max(maxX, x)
 		minY, maxY = min(minY, y), max(maxY, y)
 	}
-	return image.Rect(
-		int(minX*scale), int((pageHeightPt-maxY)*scale),
-		int(maxX*scale), int((pageHeightPt-minY)*scale),
-	)
+	return minX, minY, maxX, maxY
 }
 
 // drawTranslucentRect alpha-blends col over img within r (clipped to img's

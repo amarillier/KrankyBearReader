@@ -7,7 +7,6 @@ package main
 
 import (
 	"net/url"
-	"sync/atomic"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -16,13 +15,6 @@ import (
 
 var updateWindow fyne.Window
 var updateManagedWindow *managedWindow
-
-// aheadOfLatestRelease caches the most recent update check's verdict on
-// whether this build is newer than the latest published GitHub release (an
-// unpublished/dev build) -- set by checkForUpdatesManual/Auto below, and read
-// by about.go's showAbout so the About window's HardHat badge reflects the
-// last known state without running its own network check.
-var aheadOfLatestRelease atomic.Bool
 
 // Repo checked by "Check for Updates". rename-app.sh does not rewrite these —
 // point them at your project's actual GitHub repo when you start a new app.
@@ -41,7 +33,6 @@ func checkForUpdatesAuto(a fyne.App) {
 	go func() {
 		msg, available, remoteTag := updateChecker(updateRepoOwner, updateRepo, appName, updateRepoDL, 1)
 		ahead := versionIsNewer(appVersion, remoteTag)
-		aheadOfLatestRelease.Store(ahead)
 		if !available {
 			return
 		}
@@ -55,7 +46,6 @@ func checkForUpdatesManual(a fyne.App) {
 	go func() {
 		msg, available, remoteTag := updateChecker(updateRepoOwner, updateRepo, appName, updateRepoDL, 0)
 		ahead := versionIsNewer(appVersion, remoteTag)
-		aheadOfLatestRelease.Store(ahead)
 		fyne.Do(func() { showUpdateDialog(a, msg, available, ahead) })
 	}()
 }

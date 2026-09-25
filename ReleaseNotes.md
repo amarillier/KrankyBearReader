@@ -3,20 +3,83 @@
 ## Windows, Linux and MacOS multi-format document reader/viewer
 
 ## Future ideas:
-- Highlights: a way to annotate one with a brief comment, like a Bookmark or
-  TOC entry's title — reading an existing comment (a highlight's own
-  /Contents) already works today via the Highlights panel; writing one would
-  need pdfcpu low-level dict mutation, since pdfcpu's public API has no
-  "update an existing annotation" call, only Add/Remove
+- Real PDF text search, phased (today's find bar — view.go's buildFindBar —
+  is page-level only: it jumps to the nearest page whose extracted text
+  matches, one hit at a time, with no total count):
+  - Phase 1 — document-wide match count and true next/prev-occurrence
+    stepping (not just next/prev matching page): scan every page's
+    already-available PageText once per query, count every occurrence
+    (regexp.FindAllStringIndex, or an index-scan for plain-text mode) into
+    a flat ordered (page, occurrence) list, show "Found N matches on M
+    pages" (like Preview's "Found on 16 pages"), and have the arrows step
+    through that flat list, wrapping around, jumping pages as needed even
+    for multiple hits on the same page. Fully achievable now, no new
+    dependencies.
+  - Phase 2 — a visible highlight box on the matched word on the page
+    itself, like Preview/Acrobat's search. Blocked by the exact same gap
+    as the next item below (real text-snapped highlight drawing):
+    go-fitz's text extraction has no character/word coordinates, so
+    there's nothing to draw a box around. The same go-fitz cgo-binding
+    extension would unlock both features at once — worth doing together,
+    not twice.
+- Real text-snapped highlight drawing, like Preview/Acrobat's "select text
+  → highlight" — today's "Draw Highlight" (see Version 0.5.0) is a free
+  hand-drawn rectangle, not snapped to text, because go-fitz has no word/
+  line bounding-box API to select against. Would need either extending
+  go-fitz's own cgo bindings to walk MuPDF's stext char boxes (real
+  engineering, and has to cover both the cgo and purego backends), or
+  accepting line-level-only granularity some other way. Only
+  handleHighlightDrawn's geometry math would need to change for this, not
+  the panel/save plumbing (AddHighlight/SaveHighlights don't care how a
+  quad was produced).
 - Paint existing PDF underlines, strikeouts, and squiggly marks onto the
   rendered page too, alongside highlights (same technique, just needs each
   shape's own draw routine instead of a filled rectangle)
-- Author new PDF highlights/annotations from within the app (currently
-  read-only/list-only)
+- Maybe a bigger effort - similar to Mac Preview ability to show pdf page thumbnails to make finding test, highlights, shapes etc easier?
 - Preserve PDF region-bookmark exact scroll position on save (currently
   degrades to page-level — pdfcpu's bookmark API has no position field)
 - A visible highlight box for Text/Markdown find matches (Fyne's Entry/
   RichText widgets have no public API for painting a selection from code)
+
+
+## Version 0.4.0 - September 25, 2026
+
+### 🐛 FIXED
+
+- About window's HardHat "ahead of latest release" badge could keep showing
+  for up to a day after actually publishing a matching release — it now
+  runs its own fresh check each time the window opens instead of trusting
+  the once-a-day launch check's same-day cache, which can predate a release
+  published later that same day
+
+### ✨ NEW
+
+- PDF: the Highlights panel can now caption any highlight — one made in
+  another PDF app (Preview, Acrobat, ...) or drawn in KrankyBear Reader
+  itself — with a short comment via Edit Caption, shown in the panel list
+  instead of a bare "p.NN Highlight"
+- PDF: a new "Draw Highlight" toolbar toggle — click-drag a rectangle
+  directly on the page to create a brand-new highlight, in both
+  single-page and Continuous Scroll modes. Not text-snapped like Preview/
+  Acrobat's select-to-highlight (see Future ideas) — a free rectangle you
+  position and size by hand
+- PDF: Delete Selected in the Highlights panel removes a highlight —
+  drawn in-app or made elsewhere — from the page
+- PDF: Change Color in the Highlights panel, and a color swatch next to
+  "Draw Highlight" for the next one you draw — Fyne's own full-RGB color
+  picker, not just a handful of presets
+- PDF: click a highlight on the page to select its row in the Highlights
+  panel (and vice versa — selecting a row outlines that highlight on the
+  page in blue), so it's always clear which list entry is which highlight
+- PDF: Save to PDF in the Highlights panel now writes all of the above —
+  captions, colors, newly-drawn highlights, and deletions — together in
+  one save
+- PDF: the Highlights panel's rows now size themselves to fit their own
+  caption — a long one used to silently overlay the row below it instead
+  of wrapping into a taller row
+- PDF: reopening a file (Recent Files, drag-drop, command line, or
+  Startup Behavior's own auto-reopen) now lands back on whichever page you
+  were last reading in it, instead of always starting at page 1
 
 ## Version 0.3.0 - September 22, 2026
 

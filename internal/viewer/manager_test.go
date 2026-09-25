@@ -94,3 +94,61 @@ func TestManager_CanSaveCurrentTab_FalseWithNoTabsOpen(t *testing.T) {
 	}
 	m.SaveCurrentTab()
 }
+
+func TestManager_LastPage_DefaultsToOne(t *testing.T) {
+	m, dir := newTestManager(t)
+	a := writeTestFile(t, dir, "a.pdf", "not a real pdf, just a path")
+
+	if got := m.lastPageFor(a); got != 1 {
+		t.Errorf("lastPageFor(never-recorded path) = %d, want 1", got)
+	}
+}
+
+func TestManager_LastPage_RoundTrips(t *testing.T) {
+	m, dir := newTestManager(t)
+	a := writeTestFile(t, dir, "a.pdf", "a")
+	b := writeTestFile(t, dir, "b.pdf", "b")
+
+	m.setLastPage(a, 7)
+	m.setLastPage(b, 3)
+
+	if got := m.lastPageFor(a); got != 7 {
+		t.Errorf("lastPageFor(a) = %d, want 7", got)
+	}
+	if got := m.lastPageFor(b); got != 3 {
+		t.Errorf("lastPageFor(b) = %d, want 3", got)
+	}
+
+	// Overwriting a's page must not disturb b's.
+	m.setLastPage(a, 9)
+	if got := m.lastPageFor(a); got != 9 {
+		t.Errorf("lastPageFor(a) after overwrite = %d, want 9", got)
+	}
+	if got := m.lastPageFor(b); got != 3 {
+		t.Errorf("lastPageFor(b) after a's overwrite = %d, want unchanged 3", got)
+	}
+}
+
+func TestManager_LastPage_SurvivesAcrossManagerInstances(t *testing.T) {
+	// setLastPage/lastPageFor must go through fyne.App's Preferences, not
+	// in-memory Manager state, since the whole point is surviving a
+	// relaunch (a fresh Manager over the same App, as main() constructs on
+	// every real startup).
+	a := test.NewApp()
+	win1 := test.NewWindow(nil)
+	m1 := NewManager(win1, a)
+	m1.Build()
+
+	path := "/some/path/does-not-need-to-exist.pdf"
+	m1.setLastPage(path, 42)
+	win1.Close()
+
+	win2 := test.NewWindow(nil)
+	t.Cleanup(win2.Close)
+	m2 := NewManager(win2, a)
+	m2.Build()
+
+	if got := m2.lastPageFor(path); got != 42 {
+		t.Errorf("lastPageFor after a fresh Manager over the same App = %d, want 42", got)
+	}
+}

@@ -75,18 +75,24 @@ type view struct {
 	win fyne.Window
 	doc *Document
 
-	currentPage int
-	zoomLevel   float64 // -1 Fit Width, -2 Fit Page, else a literal zoom factor
-	continuous  bool
-	panelMode   PanelMode
+	currentPage    int
+	onPageChanged  func(int) // reports every currentPage change, for cross-launch page persistence — see setCurrentPage
+	zoomLevel      float64   // -1 Fit Width, -2 Fit Page, else a literal zoom factor
+	continuous     bool
+	panelMode      PanelMode
+	highlightMode  bool       // Draw Highlight toggle — see setHighlightMode/handleHighlightDrawn
+	highlightColor [3]float64 // color the next drawn highlight uses — see colorSwatchBtn
+	colorSwatchBtn *colorSwatch
 
-	currentImage *canvas.Image
-	imageScroll  *container.Scroll
-	viewportSize fyne.Size
+	currentImage  *canvas.Image
+	currentDrawer *highlightDrawer
+	imageScroll   *container.Scroll
+	viewportSize  fyne.Size
 
 	pagesBox           *fyne.Container
 	pagesL             *pagesLayout
 	pageImages         []*canvas.Image
+	pageDrawers        []*highlightDrawer
 	contRowW, contRowH float32
 
 	pageEntry      *widget.Entry
@@ -102,21 +108,46 @@ type view struct {
 	pdfContent  fyne.CanvasObject
 }
 
-// NewView builds the tab content for one open PDF Document.
-func NewView(win fyne.Window, doc *Document) ViewHandle {
+// NewView builds the tab content for one open PDF Document. initialPage
+// (1-based; values < 2 are a no-op) jumps there once the view is built —
+// clamped the same way jumpToPage always clamps, so a stale saved page from
+// a since-shortened file doesn't misbehave. onPageChanged, if non-nil, is
+// called with the new current page every time it changes (explicit
+// navigation or continuous-scroll tracking alike), letting the caller
+// persist "where was I" without this package needing to know that's what
+// it's for.
+func NewView(win fyne.Window, doc *Document, initialPage int, onPageChanged func(int)) ViewHandle {
 	v := &view{
-		win:         win,
-		doc:         doc,
-		currentPage: 1,
-		zoomLevel:   -1, // default to Fit Width, a sensible first look at any page size
+		win:            win,
+		doc:            doc,
+		currentPage:    1,
+		onPageChanged:  onPageChanged,
+		zoomLevel:      -1, // default to Fit Width, a sensible first look at any page size
+		highlightColor: defaultHighlightColor,
 	}
 
 	content := v.build()
+	if initialPage > 1 {
+		v.jumpToPage(initialPage)
+	}
+
 	return ViewHandle{
 		Content:    content,
 		Close:      func() { _ = doc.Close() },
 		TypedKey:   v.typedKey,
 		SaveDialog: func() { v.panel.showSaveDialog() },
+	}
+}
+
+// setCurrentPage updates currentPage and reports the change via
+// onPageChanged — the one choke point every page-changing code path
+// (jumpToPageAndPosition, continuous-scroll's updateCurrentPageFromScroll)
+// goes through, so page persistence has a single place to hook rather than
+// needing a call at every navigation site.
+func (v *view) setCurrentPage(page int) {
+	v.currentPage = page
+	if v.onPageChanged != nil {
+		v.onPageChanged(page)
 	}
 }
 
@@ -129,7 +160,14 @@ func (v *view) build() fyne.CanvasObject {
 	// a nil-pointer dereference the instant the zoom Select's initial value
 	// was set.
 	v.currentImage = &canvas.Image{FillMode: canvas.ImageFillOriginal}
-	v.imageScroll = container.NewScroll(v.currentImage)
+	v.currentDrawer = newHighlightDrawer(v.currentImage)
+	v.currentDrawer.OnDrawn = func(tl, br fyne.Position, size fyne.Size) {
+		v.handleHighlightDrawn(v.currentPage, tl, br, size)
+	}
+	v.currentDrawer.OnTapped = func(pos fyne.Position, size fyne.Size) {
+		v.handleHighlightTapped(v.currentPage, pos, size)
+	}
+	v.imageScroll = container.NewScroll(v.currentDrawer)
 	v.imageScroll.OnScrolled = func(_ fyne.Position) {
 		if v.continuous {
 			v.lazyRenderVisible()
@@ -195,6 +233,25 @@ func (v *view) buildToolbar() fyne.CanvasObject {
 		v.setContinuous(on)
 	})
 
+	// Draw Highlight: click-drag a rectangle directly on the page to create
+	// a new highlight (see highlight_draw.go) — go-fitz has no text
+	// bounding-box API for a real text-snapped selection like Preview/
+	// Acrobat's, so this is a free rectangle instead. Off by default so a
+	// plain click-drag (which did nothing before this existed) still does
+	// nothing unless the user deliberately turns this on.
+	highlightCheck := widget.NewCheck("Draw Highlight", v.setHighlightMode)
+
+	// The swatch shows the color the next drawn highlight will use; tapping
+	// it opens Fyne's own color picker (Advanced mode — full RGB, not just
+	// a handful of presets) seeded with the current choice.
+	v.colorSwatchBtn = newColorSwatch(rgbToFyneColor(v.highlightColor))
+	v.colorSwatchBtn.OnTapped = func() {
+		showHighlightColorPicker(v.win, v.highlightColor, func(rgb [3]float64) {
+			v.highlightColor = rgb
+			v.colorSwatchBtn.SetColor(rgbToFyneColor(rgb))
+		})
+	}
+
 	// A single dropdown rather than a persistent row of buttons: picking the
 	// closed option is what actually closes the split (mainContent.Objects
 	// swaps back to pdfContent alone in setPanelMode), so no side-panel width
@@ -227,7 +284,7 @@ func (v *view) buildToolbar() fyne.CanvasObject {
 	v.panelSelectRef = panelSelect
 
 	nav := container.NewHBox(panelSelect, firstBtn, prevBtn, v.pageEntry, v.totalLabel, nextBtn, lastBtn)
-	right := container.NewHBox(v.zoomSelect, continuousCheck)
+	right := container.NewHBox(v.zoomSelect, continuousCheck, highlightCheck, v.colorSwatchBtn)
 	return container.NewBorder(nil, nil, nav, right)
 }
 

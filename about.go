@@ -36,14 +36,35 @@ func showAbout(a fyne.App) {
 	// window up; see CLAUDE.md).
 	icon := newBrandingDialogImage(resourceKrankyBearReaderPng)
 
-	// Reflects the last update check's verdict (see update.go's
-	// aheadOfLatestRelease): a small HardHat badge beside the app icon when
-	// this build is newer than the latest published GitHub release.
-	var iconDisplay fyne.CanvasObject = icon
-	if aheadOfLatestRelease.Load() {
-		badge := newBrandingBadgeImage(resourceKrankyBearHardHatPng)
-		iconDisplay = container.NewHBox(icon, badge)
-	}
+	// Starts as just the icon; a HardHat badge is added beside it (never
+	// instead of it) once the fresh check below confirms this build is newer
+	// than the latest published GitHub release. Deliberately runs its own
+	// fresh, unthrottled check here rather than trusting whichever background
+	// check happened to run most recently: the once-a-day launch auto-check
+	// can be a same-day cache from *before* today's release went out — still
+	// reporting "ahead" for up to a day after publishing, even though a fresh
+	// check (like this one, or a manual "Check for Updates") would correctly
+	// see the versions now match. Confirmed via manual testing: right after
+	// committing and publishing a release, About kept showing the HardHat
+	// while a manual "Check for Updates" right next to it correctly said
+	// "you are running the latest version".
+	iconRow := container.NewHBox(icon)
+	win := aboutWindow // stable local reference for the goroutine below —
+	// aboutWindow is a package var that a later showAbout call (if this
+	// window is closed and reopened before the check below completes) would
+	// reassign to a brand new window, and this goroutine must keep updating
+	// the window it actually started the check for.
+	go func() {
+		_, _, remoteTag := updateChecker(updateRepoOwner, updateRepo, appName, updateRepoDL, 0)
+		if !versionIsNewer(appVersion, remoteTag) {
+			return
+		}
+		fyne.Do(func() {
+			iconRow.Add(newBrandingBadgeImage(resourceKrankyBearHardHatPng))
+			iconRow.Refresh()
+			win.Canvas().Refresh(iconRow)
+		})
+	}()
 
 	// Title and version info
 	title := widget.NewLabelWithStyle(appName, fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
@@ -72,7 +93,7 @@ func showAbout(a fyne.App) {
 
 	// Layout
 	content := container.NewVBox(
-		container.NewCenter(iconDisplay),
+		container.NewCenter(iconRow),
 		widget.NewSeparator(),
 		title,
 		version,

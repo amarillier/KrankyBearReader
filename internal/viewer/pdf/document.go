@@ -45,6 +45,15 @@ type Document struct {
 	Bookmarks  *BookmarkManager
 	Highlights []*Highlight
 
+	// pendingHighlightDeletes holds the ObjNr of every on-disk highlight
+	// removed via DeleteHighlight since the last save — see SaveHighlights.
+	pendingHighlightDeletes []int
+
+	// selectedHighlight is drawn with an extra outline by paintHighlights,
+	// so the page visibly matches whichever row is selected in the
+	// Highlights panel — see SetSelectedHighlight.
+	selectedHighlight *Highlight
+
 	textCacheMu sync.Mutex
 	textCache   map[int]string // page -> extracted text, filled lazily by PageText
 }
@@ -100,6 +109,19 @@ func (d *Document) Close() error {
 
 // Path is the file path this Document was opened from.
 func (d *Document) Path() string { return d.path }
+
+// PageBoundsPt returns page's (1-based) size in PDF user-space points
+// (origin bottom-left) — the same call paintHighlights uses to map a
+// highlight's /QuadPoints onto a rendered image, and what the highlight-
+// drawing UI uses in reverse, to turn a drawn rectangle back into
+// /QuadPoints.
+func (d *Document) PageBoundsPt(page int) (w, h float64, err error) {
+	b, err := d.doc.Bound(page - 1) // go-fitz is 0-based
+	if err != nil {
+		return 0, 0, err
+	}
+	return float64(b.Dx()), float64(b.Dy()), nil
+}
 
 // PageCount is the total number of pages.
 func (d *Document) PageCount() int { return d.pageCount }

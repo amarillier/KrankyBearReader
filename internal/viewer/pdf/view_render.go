@@ -65,7 +65,7 @@ func (v *view) jumpToPageAndPosition(page int, frac float32) {
 	if page > v.doc.PageCount() {
 		page = v.doc.PageCount()
 	}
-	v.currentPage = page
+	v.setCurrentPage(page)
 	v.pageEntry.SetText(fmt.Sprintf("%d", page))
 
 	if v.continuous {
@@ -152,6 +152,88 @@ func (v *view) renderCurrentPage() error {
 	return nil
 }
 
+// repaintPage forces page (1-based) to re-render on the next paint.
+// AddHighlight/DeleteHighlight already clear the whole render cache, but the
+// already-rendered *image.Image sitting in v.currentImage/v.pageImages is
+// still there and won't repaint on its own — renderCurrentPage's cache Get
+// would just miss and re-render (cheap), but continuous mode's
+// lazyRenderVisible only fills in a page image when it's nil, so that one
+// needs an explicit nudge.
+func (v *view) repaintPage(page int) {
+	if v.continuous {
+		if i := page - 1; i >= 0 && i < len(v.pageImages) {
+			v.pageImages[i].Image = nil
+		}
+		v.lazyRenderVisible()
+		return
+	}
+	if page != v.currentPage {
+		return
+	}
+	if err := v.renderCurrentPage(); err != nil {
+		dialog.ShowError(err, v.win)
+	}
+}
+
+// setHighlightMode toggles Draw Highlight mode: while on, dragging on the
+// page creates a new highlight (see highlightDrawer.Dragged/DragEnd);
+// while off, dragging on the page does nothing, same as before this
+// feature existed. Applies to every page's drawer at once, single-page and
+// continuous alike, so switching modes mid-scroll doesn't leave some pages
+// still draggable.
+func (v *view) setHighlightMode(on bool) {
+	v.highlightMode = on
+	if v.currentDrawer != nil {
+		v.currentDrawer.Enabled = on
+	}
+	for _, d := range v.pageDrawers {
+		if d != nil {
+			d.Enabled = on
+		}
+	}
+}
+
+// handleHighlightDrawn is every highlightDrawer.OnDrawn's target, for both
+// single-page and continuous-scroll page widgets: converts the drawn
+// rectangle from widget-local points into a PDF quad (widgetRectToQuad)
+// and adds it as a new in-memory highlight, then makes it visible
+// immediately — in the Highlights panel's list and painted on the page.
+func (v *view) handleHighlightDrawn(page int, topLeft, bottomRight fyne.Position, widgetSize fyne.Size) {
+	pageW, pageH, err := v.doc.PageBoundsPt(page)
+	if err != nil {
+		return
+	}
+	quad := widgetRectToQuad(topLeft, bottomRight, widgetSize, pageW, pageH)
+	v.doc.AddHighlight(page, [][8]float64{quad}, v.highlightColor, "")
+	v.highlights.refreshList()
+	v.repaintPage(page)
+}
+
+// handleHighlightTapped is every highlightDrawer.OnTapped's target: hit-
+// tests the tap against this page's highlights (Document.HighlightAt) and,
+// on a hit, selects it in the Highlights panel's list — the reverse
+// direction of selecting a list row and seeing it outlined on the page.
+// Reuses the list's own Select (which fires OnSelected, see
+// highlightsPanel.newHighlightsPanel) rather than duplicating its
+// jump/outline/repaint logic here.
+func (v *view) handleHighlightTapped(page int, pos fyne.Position, widgetSize fyne.Size) {
+	pageW, pageH, err := v.doc.PageBoundsPt(page)
+	if err != nil {
+		return
+	}
+	x, y := widgetPointToPDF(pos, widgetSize, pageW, pageH)
+	h := v.doc.HighlightAt(page, x, y)
+	if h == nil {
+		return
+	}
+	for i, candidate := range v.doc.Highlights {
+		if candidate == h {
+			v.highlights.list.Select(i)
+			return
+		}
+	}
+}
+
 func (v *view) applyFitWidth(imgW, imgH int) {
 	vpW := v.viewportSize.Width - 4
 	if vpW <= 0 || imgW <= 0 {
@@ -218,7 +300,7 @@ func (v *view) setContinuous(on bool) {
 	if on {
 		v.buildContinuousPages()
 	} else {
-		v.imageScroll.Content = v.currentImage
+		v.imageScroll.Content = v.currentDrawer
 		v.imageScroll.Refresh()
 		if err := v.renderCurrentPage(); err != nil {
 			dialog.ShowError(err, v.win)
@@ -290,12 +372,24 @@ func (v *view) buildContinuousPages() {
 
 	v.pagesL = &pagesLayout{rowW: v.contRowW, rowH: v.contRowH}
 	v.pageImages = make([]*canvas.Image, n)
+	v.pageDrawers = make([]*highlightDrawer, n)
 	objs := make([]fyne.CanvasObject, n)
 	for i := range v.pageImages {
 		img := canvas.NewImageFromImage(nil)
 		img.FillMode = canvas.ImageFillStretch
 		v.pageImages[i] = img
-		objs[i] = img
+
+		page := i + 1
+		drawer := newHighlightDrawer(img)
+		drawer.Enabled = v.highlightMode
+		drawer.OnDrawn = func(tl, br fyne.Position, size fyne.Size) {
+			v.handleHighlightDrawn(page, tl, br, size)
+		}
+		drawer.OnTapped = func(pos fyne.Position, size fyne.Size) {
+			v.handleHighlightTapped(page, pos, size)
+		}
+		v.pageDrawers[i] = drawer
+		objs[i] = drawer
 	}
 	v.pagesBox = container.New(v.pagesL, objs...)
 	v.pagesBox.Resize(v.pagesBox.MinSize())
@@ -371,7 +465,7 @@ func (v *view) updateCurrentPageFromScroll() {
 		page = v.doc.PageCount()
 	}
 	if page != v.currentPage {
-		v.currentPage = page
+		v.setCurrentPage(page)
 		v.pageEntry.SetText(fmt.Sprintf("%d", page))
 	}
 }
