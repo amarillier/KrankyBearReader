@@ -43,6 +43,13 @@ type highlightDrawer struct {
 	// coordinate space as OnDrawn.
 	OnTapped func(pos fyne.Position, widgetSize fyne.Size)
 
+	// OnTappedSecondary fires on a right-click (or long-press) — same
+	// click-to-select gesture as OnTapped (pos/widgetSize are the same
+	// coordinate space), plus absolutePos (canvas-space, from the
+	// triggering *fyne.PointEvent's own AbsolutePosition) for positioning a
+	// context menu right at the cursor.
+	OnTappedSecondary func(pos fyne.Position, widgetSize fyne.Size, absolutePos fyne.Position)
+
 	dragging   bool
 	start, cur fyne.Position
 }
@@ -127,6 +134,14 @@ func (d *highlightDrawer) DragEnd() {
 func (d *highlightDrawer) Tapped(e *fyne.PointEvent) {
 	if d.OnTapped != nil {
 		d.OnTapped(e.Position, d.Size())
+	}
+}
+
+// TappedSecondary fires OnTappedSecondary, implementing fyne.SecondaryTappable
+// so a right-click (or long-press) reaches this widget at all.
+func (d *highlightDrawer) TappedSecondary(e *fyne.PointEvent) {
+	if d.OnTappedSecondary != nil {
+		d.OnTappedSecondary(e.Position, d.Size(), e.AbsolutePosition)
 	}
 }
 

@@ -3,11 +3,13 @@ package pdf
 import (
 	"bytes"
 	"fmt"
+	"image"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/pdfcpu/pdfcpu/pkg/api"
+	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/color"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
@@ -44,6 +46,50 @@ func TestFlattenHighlights_SortsByPageAndKeepsOnlyKnownKinds(t *testing.T) {
 	}
 	if got[0].Contents != "page one underline" {
 		t.Errorf("expected Contents %q, got %q", "page one underline", got[0].Contents)
+	}
+}
+
+// TestLoadHighlights_LineGeometryAndEndStyles confirms a real Line
+// annotation (an arrow, in this case) round-trips its /L endpoints, /LE
+// ending styles, and /C color back through LoadHighlights the same way a
+// Highlight's /QuadPoints and /C already did — the same read-back gap
+// highlightGeometry's doc comment explains applies to Line too (pdfcpu's
+// own Annotation() never populates LineAnnotation.P1/P2 from an existing
+// PDF), worked around by lineGeometry re-dereferencing the raw dict.
+func TestLoadHighlights_LineGeometryAndEndStyles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.pdf")
+	writeMinimalPDF(t, path)
+
+	rect := types.RectForDim(120, 60)
+	p1, p2 := types.Point{X: 10, Y: 10}, types.Point{X: 100, Y: 50}
+	none, closedArrow := model.LENone, model.LEClosedArrow
+	red := color.SimpleColor{R: 1, G: 0, B: 0}
+	ann := model.NewLineAnnotation(*rect, 0, "", "", "", 0, &red, "", nil, nil, "", "",
+		p1, p2, &none, &closedArrow, 0, 0, 0, nil, nil, false, false, 0, 0, nil, 0, 0)
+	if err := api.AddAnnotationsFile(path, path, []string{"1"}, ann, nil, false); err != nil {
+		t.Fatalf("adding test line: %v", err)
+	}
+
+	highlights, err := LoadHighlights(path)
+	if err != nil {
+		t.Fatalf("LoadHighlights: %v", err)
+	}
+	if len(highlights) != 1 || highlights[0].Kind != "Line" {
+		t.Fatalf("expected 1 Line highlight, got %+v", highlights)
+	}
+	h := highlights[0]
+	if want := [3]float64{1, 0, 0}; h.Color != want {
+		t.Errorf("expected Line color %v, got %v", want, h.Color)
+	}
+	if want := [2]string{"None", "ClosedArrow"}; h.LineEndStyle != want {
+		t.Errorf("expected LineEndStyle %v, got %v", want, h.LineEndStyle)
+	}
+	if len(h.Line) != 4 {
+		t.Fatalf("expected 4 line coordinates, got %v", h.Line)
+	}
+	if h.Line[0] != 10 || h.Line[1] != 10 || h.Line[2] != 100 || h.Line[3] != 50 {
+		t.Errorf("expected Line [10 10 100 50] (within Rect, no clamping needed), got %v", h.Line)
 	}
 }
 
@@ -267,15 +313,185 @@ func TestSaveHighlights_ColorRoundTrips(t *testing.T) {
 	}
 }
 
-// TestSaveHighlights_DoesNotRecolorNonHighlightKinds guards a real bug
-// caught while adding the color picker: Color is only ever populated for
-// Kind == "Highlight" (flattenHighlights only calls highlightGeometry for
-// model.AnnHighLight), so an Underline/Strikeout/Squiggly/Note's in-memory
-// Color sits at the Go zero value, [3]float64{} (black) — not that
-// annotation's real /C. An earlier version of SaveHighlights rewrote /C
-// for every ObjNr>0 highlight unconditionally, which would have silently
-// blackened every such annotation's real color on the very next save.
-func TestSaveHighlights_DoesNotRecolorNonHighlightKinds(t *testing.T) {
+// TestSaveHighlights_OverwriteClearsRenderCache guards a real bug: a page
+// already rendered (and cached) before Save to PDF overwrites d.path kept
+// showing its pre-save render — missing whatever the save itself had just
+// changed on disk (a healed xref, a new color, ...) — until the tab was
+// fully closed and reopened, because nothing was clearing the cache for
+// an overwrite the way AddHighlight/DeleteHighlight/SetHighlightColor
+// already do for the one page they know they changed. An overwrite can
+// change what's on ANY page (OptimizeContext's flatten isn't scoped to
+// pages with pending highlight edits), so every cached page must be
+// dropped, not just one.
+func TestSaveHighlights_OverwriteClearsRenderCache(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.pdf")
+	writeMinimalPDF(t, path)
+
+	doc := &Document{path: path, cache: newPageCache(pageCacheCapacity)}
+	key := cacheKey(1, 1.0)
+	doc.cache.Put(key, image.NewRGBA(image.Rect(0, 0, 1, 1)))
+	if _, ok := doc.cache.Get(key); !ok {
+		t.Fatalf("test setup failed: expected the seeded cache entry to be there")
+	}
+
+	if err := doc.SaveHighlights(path); err != nil {
+		t.Fatalf("SaveHighlights: %v", err)
+	}
+
+	if _, ok := doc.cache.Get(key); ok {
+		t.Errorf("expected SaveHighlights to clear the render cache on an overwrite, but the stale entry is still there")
+	}
+}
+
+// TestSaveHighlights_SaveAsLeavesRenderCacheAlone confirms the above is
+// scoped correctly: a Save-As (outputPath != d.path) is an export, not a
+// commit — d.path's own bytes are untouched, so whatever's cached from
+// them is still valid and must not be thrown away.
+func TestSaveHighlights_SaveAsLeavesRenderCacheAlone(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.pdf")
+	writeMinimalPDF(t, path)
+
+	doc := &Document{path: path, cache: newPageCache(pageCacheCapacity)}
+	key := cacheKey(1, 1.0)
+	doc.cache.Put(key, image.NewRGBA(image.Rect(0, 0, 1, 1)))
+
+	outPath := filepath.Join(dir, "copy.pdf")
+	if err := doc.SaveHighlights(outPath); err != nil {
+		t.Fatalf("SaveHighlights: %v", err)
+	}
+
+	if _, ok := doc.cache.Get(key); !ok {
+		t.Errorf("expected a Save-As to leave the render cache untouched, but the entry is gone")
+	}
+}
+
+// TestRemoveAnnotationsRepairingIfNeeded_RecoversFromDanglingReference
+// guards the real bug found on a real file: pdfcpu.RemoveAnnotations
+// validates the FULL object graph reachable from a page's annotations
+// before allowing removal — including inside a dict key this app has no
+// special knowledge of, exactly like Preview's own AAPL:AKExtras private
+// annotation metadata — and hard-fails on the first indirect reference
+// that doesn't resolve to anything, with no lenient mode. Simulates that
+// exact shape (an opaque key holding a reference to a now-missing
+// object) rather than depending on a real AAPL blob, which would need a
+// huge fixture to reproduce faithfully.
+func TestRemoveAnnotationsRepairingIfNeeded_RecoversFromDanglingReference(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.pdf")
+	writeMinimalPDF(t, path)
+
+	rect := types.RectForDim(50, 50)
+	quad := types.QuadPoints{*types.NewQuadLiteralForRect(rect)}
+	ann := model.NewHighlightAnnotation(*rect, 0, "", "", "", 0, nil, 0, 0, 0, "", nil, nil, "", "", quad)
+	if err := api.AddAnnotationsFile(path, path, []string{"1"}, ann, nil, false); err != nil {
+		t.Fatalf("adding test highlight: %v", err)
+	}
+
+	highlights, err := LoadHighlights(path)
+	if err != nil {
+		t.Fatalf("LoadHighlights: %v", err)
+	}
+	if len(highlights) != 1 {
+		t.Fatalf("expected 1 highlight, got %d", len(highlights))
+	}
+	objNr := highlights[0].ObjNr
+
+	ctx, err := api.ReadContextFile(path)
+	if err != nil {
+		t.Fatalf("ReadContextFile: %v", err)
+	}
+	dict, err := ctx.XRefTable.DereferenceDict(*types.NewIndirectRef(objNr, 0))
+	if err != nil || dict == nil {
+		t.Fatalf("dereferencing test annotation: %v", err)
+	}
+	dict.Update("Test:DanglingRef", *types.NewIndirectRef(999999, 0))
+
+	// Confirm the scenario actually reproduces the bug before trusting the
+	// fix: a bare RemoveAnnotations call must fail here.
+	if _, err := pdfcpu.RemoveAnnotations(ctx, nil, nil, []int{objNr}, false); err == nil {
+		t.Fatalf("expected a bare RemoveAnnotations to fail against a dangling reference, it succeeded")
+	}
+
+	if err := removeAnnotationsRepairingIfNeeded(ctx, []int{objNr}); err != nil {
+		t.Fatalf("removeAnnotationsRepairingIfNeeded: %v", err)
+	}
+}
+
+// TestHighlightDictChanges guards the gate SaveHighlights uses to decide
+// whether an existing highlight's dict needs touching at all — see
+// SaveHighlights' own doc comment on why an untouched dict must stay
+// byte-for-byte untouched, not just value-equal after a round trip.
+func TestHighlightDictChanges(t *testing.T) {
+	base := &Highlight{Kind: "Highlight", Contents: "same", Color: [3]float64{1, 0, 0}}
+	base.origContents, base.origColor = base.Contents, base.Color
+
+	if c, col := highlightDictChanges(base); c || col {
+		t.Errorf("expected no changes for an untouched highlight, got contentsChanged=%v colorChanged=%v", c, col)
+	}
+
+	withNewCaption := *base
+	withNewCaption.Contents = "different"
+	if c, col := highlightDictChanges(&withNewCaption); !c || col {
+		t.Errorf("expected only contentsChanged for a caption edit, got contentsChanged=%v colorChanged=%v", c, col)
+	}
+
+	withNewColor := *base
+	withNewColor.Color = [3]float64{0, 1, 0}
+	if c, col := highlightDictChanges(&withNewColor); c || !col {
+		t.Errorf("expected only colorChanged for a color edit, got contentsChanged=%v colorChanged=%v", c, col)
+	}
+
+	// Note isn't a hasPaintedColor kind, so a Color/origColor mismatch on
+	// one must never report colorChanged=true — its Color is meaningless
+	// (Go zero value, not a real /C) in the first place.
+	noteWithColorDrift := &Highlight{Kind: "Note", Color: [3]float64{1, 1, 1}}
+	if _, col := highlightDictChanges(noteWithColorDrift); col {
+		t.Errorf("expected colorChanged=false for Note even with a Color/origColor mismatch, got true")
+	}
+}
+
+// TestLoadHighlights_SnapshotsOrigContentsAndColor confirms flattenHighlights
+// actually populates origContents/origColor to match what was just loaded
+// — if it didn't, highlightDictChanges would report every highlight as
+// changed on every save, defeating the whole point of the gate above.
+func TestLoadHighlights_SnapshotsOrigContentsAndColor(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.pdf")
+	writeMinimalPDF(t, path)
+
+	rect := types.RectForDim(100, 10)
+	quad := types.QuadPoints{*types.NewQuadLiteralForRect(rect)}
+	red := color.SimpleColor{R: 1, G: 0, B: 0}
+	ann := model.NewHighlightAnnotation(*rect, 0, "loaded caption", "", "", 0, &red, 0, 0, 0, "", nil, nil, "", "", quad)
+	if err := api.AddAnnotationsFile(path, path, []string{"1"}, ann, nil, false); err != nil {
+		t.Fatalf("adding test highlight: %v", err)
+	}
+
+	highlights, err := LoadHighlights(path)
+	if err != nil {
+		t.Fatalf("LoadHighlights: %v", err)
+	}
+	if len(highlights) != 1 {
+		t.Fatalf("expected 1 highlight, got %d", len(highlights))
+	}
+	h := highlights[0]
+	if h.origContents != h.Contents {
+		t.Errorf("expected origContents %q to match loaded Contents %q", h.origContents, h.Contents)
+	}
+	if h.origColor != h.Color {
+		t.Errorf("expected origColor %v to match loaded Color %v", h.origColor, h.Color)
+	}
+}
+
+// TestSaveHighlights_UnderlineColorPaints confirms the fix that lets
+// paintHighlights draw Underline/Strikeout/Squiggly too (see
+// paintableMarkupKinds): loading a real Underline annotation must now
+// populate Color and Quads from its own /QuadPoints and /C, the same way
+// Highlight always has, and saving it back must leave that real color
+// untouched rather than losing it.
+func TestSaveHighlights_UnderlineColorPaints(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.pdf")
 	writeMinimalPDF(t, path)
@@ -295,16 +511,68 @@ func TestSaveHighlights_DoesNotRecolorNonHighlightKinds(t *testing.T) {
 	if len(highlights) != 1 || highlights[0].Kind != "Underline" {
 		t.Fatalf("expected 1 Underline highlight, got %+v", highlights)
 	}
-	if highlights[0].Color != [3]float64{} {
-		t.Fatalf("expected Color to stay at its zero value for a non-Highlight kind, got %v", highlights[0].Color)
+	if want := [3]float64{0, 0, 1}; highlights[0].Color != want {
+		t.Fatalf("expected Underline's real color %v to be read back, got %v", want, highlights[0].Color)
+	}
+	if len(highlights[0].Quads) != 1 {
+		t.Fatalf("expected Underline's real geometry to be read back, got %d quads", len(highlights[0].Quads))
 	}
 
-	doc := &Document{path: path, Highlights: highlights}
+	doc := &Document{path: path, Highlights: highlights, cache: newPageCache(pageCacheCapacity)}
 	if err := doc.SaveHighlights(path); err != nil {
 		t.Fatalf("SaveHighlights: %v", err)
 	}
 
-	// LoadHighlights itself never reads a non-Highlight's /C back (see
+	reloaded, err := LoadHighlights(path)
+	if err != nil {
+		t.Fatalf("LoadHighlights (reloaded): %v", err)
+	}
+	if len(reloaded) != 1 {
+		t.Fatalf("expected 1 highlight after reload, got %d", len(reloaded))
+	}
+	if got := reloaded[0].Color; got != [3]float64{0, 0, 1} {
+		t.Errorf("expected the real Underline color %v to survive a save, got %v", [3]float64{0, 0, 1}, got)
+	}
+}
+
+// TestSaveHighlights_DoesNotRecolorNoteKind is what
+// TestSaveHighlights_UnderlineColorPaints (above) replaced now that
+// Underline is a real, correctly-colored case rather than a "must not get
+// blackened" one: Color is only ever populated for a paintableMarkupKinds
+// kind (flattenHighlights only calls highlightGeometry for those), so a
+// "Note" (Text/Popup)'s in-memory Color sits at the Go zero value,
+// [3]float64{} (black) — not that annotation's real /C. SaveHighlights must
+// keep gating its /C rewrite on paintableMarkupKinds, or a Note's real
+// color would get silently blackened on the very next save.
+func TestSaveHighlights_DoesNotRecolorNoteKind(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.pdf")
+	writeMinimalPDF(t, path)
+
+	rect := types.RectForDim(100, 10)
+	blue := color.SimpleColor{R: 0, G: 0, B: 1}
+	ann := model.NewTextAnnotation(*rect, 0, "", "", "", 0, &blue, "", nil, nil, "", "", 0, 0, 0, false, "")
+	if err := api.AddAnnotationsFile(path, path, []string{"1"}, ann, nil, false); err != nil {
+		t.Fatalf("adding test note: %v", err)
+	}
+
+	highlights, err := LoadHighlights(path)
+	if err != nil {
+		t.Fatalf("LoadHighlights: %v", err)
+	}
+	if len(highlights) != 1 || highlights[0].Kind != "Note" {
+		t.Fatalf("expected 1 Note highlight, got %+v", highlights)
+	}
+	if highlights[0].Color != [3]float64{} {
+		t.Fatalf("expected Color to stay at its zero value for Note, got %v", highlights[0].Color)
+	}
+
+	doc := &Document{path: path, Highlights: highlights, cache: newPageCache(pageCacheCapacity)}
+	if err := doc.SaveHighlights(path); err != nil {
+		t.Fatalf("SaveHighlights: %v", err)
+	}
+
+	// LoadHighlights itself never reads a Note's /C back (see
 	// flattenHighlights), so it can't be used to detect this — read the
 	// raw dict directly instead, the same way highlightGeometry does.
 	ctx, err := api.ReadContextFile(path)
@@ -313,7 +581,7 @@ func TestSaveHighlights_DoesNotRecolorNonHighlightKinds(t *testing.T) {
 	}
 	_, col := highlightGeometry(ctx.XRefTable, highlights[0].ObjNr)
 	if want := [3]float64{0, 0, 1}; col != want {
-		t.Errorf("expected the real Underline color %v to survive a save untouched, got %v", want, col)
+		t.Errorf("expected the real Note color %v to survive a save untouched, got %v", want, col)
 	}
 }
 
@@ -344,6 +612,59 @@ func TestHighlightAt(t *testing.T) {
 	if got := d.HighlightAt(1, 1, 5+100); got != nil {
 		// Sanity: a point on the RIGHT page but wrong Y should still miss.
 		t.Errorf("expected a point outside the quad's Y range to miss, got %v", got)
+	}
+}
+
+// TestHighlightAt_GenericRectKind confirms click-select works for a shape
+// kind with no per-kind geometry parsing at all (Square, Circle, Polygon,
+// PolyLine, Ink, Stamp, FreeText, Caret — see genericRectKinds), falling
+// back to its overall Rect the same way Quad-based kinds fall back to
+// their bounding box.
+func TestHighlightAt_GenericRectKind(t *testing.T) {
+	square := &Highlight{Page: 1, Kind: "Square", Rect: [4]float64{10, 10, 50, 50}}
+	stamp := &Highlight{Page: 1, Kind: "Stamp", Rect: [4]float64{}} // malformed/unreadable /Rect
+	d := &Document{Highlights: []*Highlight{square, stamp}}
+
+	if got := d.HighlightAt(1, 20, 20); got != square {
+		t.Errorf("expected a point inside the Square's Rect to hit it, got %v", got)
+	}
+	if got := d.HighlightAt(1, 100, 100); got != nil {
+		t.Errorf("expected a point outside the Square's Rect to miss, got %v", got)
+	}
+	if got := d.HighlightAt(1, 0, 0); got != nil {
+		t.Errorf("expected a zero-value Rect (unreadable /Rect) to never hit, got %v", got)
+	}
+}
+
+// TestDeleteHighlight_WorksForGenericRectKind confirms Delete doesn't need
+// any kind-specific handling: it only ever needs a Highlight's ObjNr, so
+// a shape kind this app has no geometry-parsing or paint routine for at
+// all (Stamp here) deletes exactly the same way a Highlight does.
+func TestDeleteHighlight_WorksForGenericRectKind(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.pdf")
+	writeMinimalPDF(t, path)
+
+	rect := types.RectForDim(50, 50)
+	ann := model.NewSquareAnnotation(*rect, 0, "", "", "", 0, nil, "", nil, nil, "", "", nil, 0, 0, 0, 0, 0, model.BSSolid, false, 0)
+	if err := api.AddAnnotationsFile(path, path, []string{"1"}, ann, nil, false); err != nil {
+		t.Fatalf("adding Square annotation: %v", err)
+	}
+
+	doc, err := Prepare(path)
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	defer doc.Close()
+
+	if len(doc.Highlights) != 1 || doc.Highlights[0].Kind != "Square" {
+		t.Fatalf("expected 1 Square highlight after Prepare, got %+v", doc.Highlights)
+	}
+	if !doc.DeleteHighlight(doc.Highlights[0]) {
+		t.Fatalf("DeleteHighlight reported not found")
+	}
+	if len(doc.Highlights) != 0 {
+		t.Errorf("expected the Square highlight gone after delete, got %+v", doc.Highlights)
 	}
 }
 

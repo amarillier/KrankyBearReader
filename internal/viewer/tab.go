@@ -61,11 +61,12 @@ type tabHooks struct {
 // segfaulted deep in Fyne's text shaper during manual testing of this
 // feature), not just risk a stale repaint.
 //
-// initialPage and onPageChanged only mean anything for FormatPDF (see
-// buildTabView/pdf.NewView) — every other format ignores them. They travel
-// this far down because manager.go's OpenFile is the one place that knows
-// path, and page-position persistence is keyed by path.
-func newTabContent(win fyne.Window, path string, format Format, initialPage int, onPageChanged func(int), onReady func(tabHooks)) fyne.CanvasObject {
+// initialPage, onPageChanged, and onRetargeted only mean anything for
+// FormatPDF (see buildTabView/pdf.NewView) — every other format ignores
+// them. They travel this far down because manager.go's OpenFile is the one
+// place that knows path, and both page-position persistence and the tab's
+// own path bookkeeping (see pdf.view.retargetTo) are keyed by path.
+func newTabContent(win fyne.Window, path string, format Format, initialPage int, onPageChanged func(int), onRetargeted func(oldPath, newPath string), onReady func(tabHooks)) fyne.CanvasObject {
 	loadingBar := widget.NewProgressBarInfinite()
 	loading := container.NewVBox(widget.NewLabel("Loading "+filepath.Base(path)+"..."), loadingBar)
 	holder := container.NewStack(loading)
@@ -73,7 +74,7 @@ func newTabContent(win fyne.Window, path string, format Format, initialPage int,
 	go func() {
 		data := prepareTabData(path, format)
 		fyne.Do(func() {
-			content, hooks := buildTabView(win, path, data, initialPage, onPageChanged)
+			content, hooks := buildTabView(win, path, data, initialPage, onPageChanged, onRetargeted)
 			loadingBar.Stop()
 			holder.Objects = []fyne.CanvasObject{content}
 			holder.Refresh()
@@ -211,7 +212,7 @@ func binaryFallbackTabData(data []byte) tabData {
 // buildTabView turns prepared data into the actual widget tree, plus any
 // per-tab hooks (close/typedKey) the caller needs to register. Must only run
 // on the main goroutine (inside fyne.Do).
-func buildTabView(win fyne.Window, path string, d tabData, initialPage int, onPageChanged func(int)) (fyne.CanvasObject, tabHooks) {
+func buildTabView(win fyne.Window, path string, d tabData, initialPage int, onPageChanged func(int), onRetargeted func(oldPath, newPath string)) (fyne.CanvasObject, tabHooks) {
 	if d.err != nil {
 		return newLoadErrorView(win, path, d.err, d.raw), tabHooks{}
 	}
@@ -221,7 +222,7 @@ func buildTabView(win fyne.Window, path string, d tabData, initialPage int, onPa
 	case FormatBinary:
 		return NewHexView(d.hexSample, d.hexTotal), tabHooks{}
 	case FormatPDF:
-		handle := pdf.NewView(win, d.pdfDoc, initialPage, onPageChanged)
+		handle := pdf.NewView(win, d.pdfDoc, initialPage, onPageChanged, onRetargeted)
 		return handle.Content, tabHooks{close: handle.Close, typedKey: handle.TypedKey, saveDialog: handle.SaveDialog}
 	case FormatJSON, FormatYAML, FormatTOML:
 		return NewStructuredTreeView(d.structured), tabHooks{}

@@ -109,6 +109,31 @@ func (m *Manager) forgetTab(item *container.TabItem) {
 	}
 }
 
+// retargetTab updates this Manager's own path-keyed bookkeeping after a PDF
+// tab's view has switched itself from oldPath to newPath (see
+// pdf.view.retargetTo) — a genuine "Save as a new file..." from the
+// Highlights panel, never an overwrite (which never changes what path a
+// tab is open on). Mirrors what OpenFile sets up for a brand-new tab, just
+// against the existing item instead of creating one, so this tab now
+// behaves exactly as if newPath had been opened fresh: reflected in the
+// tab's own title, the open-files dedup map, and recent files.
+//
+// If newPath happens to already be open in a DIFFERENT tab (a rare edge
+// case: saving as a file that's independently already open elsewhere),
+// this still updates item's own openPaths entry, silently overwriting
+// whichever tab's entry was there — leaving the dedup map briefly
+// disagreeing about which tab "owns" newPath is an acceptable, unlikely-
+// to-matter cost against the complexity of reconciling two tabs open on
+// the same file here.
+func (m *Manager) retargetTab(item *container.TabItem, oldPath, newPath string) {
+	delete(m.openPaths, oldPath)
+	m.openPaths[newPath] = item
+	m.itemPaths[item] = newPath
+	item.Text = filepath.Base(newPath)
+	m.tabs.Refresh()
+	m.addRecent(newPath)
+}
+
 func (m *Manager) refreshRoot() {
 	if len(m.tabs.Items) == 0 {
 		m.root.Objects = []fyne.CanvasObject{m.placeholder}
@@ -136,8 +161,16 @@ func (m *Manager) OpenFile(path string) error {
 
 	item := &container.TabItem{Text: filepath.Base(path)}
 	initialPage := m.lastPageFor(path)
-	onPageChanged := func(page int) { m.setLastPage(path, page) }
-	item.Content = newTabContent(m.win, path, format, initialPage, onPageChanged, func(hooks tabHooks) {
+	// Looks up itemPaths[item] at call time rather than closing over path
+	// directly, so this keeps recording against the right file even after
+	// retargetTab below repoints itemPaths[item] at a saved-as file.
+	onPageChanged := func(page int) {
+		if p, ok := m.itemPaths[item]; ok {
+			m.setLastPage(p, page)
+		}
+	}
+	onRetargeted := func(oldPath, newPath string) { m.retargetTab(item, oldPath, newPath) }
+	item.Content = newTabContent(m.win, path, format, initialPage, onPageChanged, onRetargeted, func(hooks tabHooks) {
 		m.records[item] = &tabRecord{close: hooks.close, typedKey: hooks.typedKey, saveDialog: hooks.saveDialog}
 	})
 	m.openPaths[path] = item

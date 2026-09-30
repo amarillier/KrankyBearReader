@@ -76,8 +76,9 @@ type view struct {
 	doc *Document
 
 	currentPage    int
-	onPageChanged  func(int) // reports every currentPage change, for cross-launch page persistence — see setCurrentPage
-	zoomLevel      float64   // -1 Fit Width, -2 Fit Page, else a literal zoom factor
+	onPageChanged  func(int)                     // reports every currentPage change, for cross-launch page persistence — see setCurrentPage
+	onRetargeted   func(oldPath, newPath string) // reports a successful retargetTo, for the tab-owning code's own path bookkeeping — see retargetTo
+	zoomLevel      float64                       // -1 Fit Width, -2 Fit Page, else a literal zoom factor
 	continuous     bool
 	panelMode      PanelMode
 	highlightMode  bool       // Draw Highlight toggle — see setHighlightMode/handleHighlightDrawn
@@ -115,13 +116,18 @@ type view struct {
 // called with the new current page every time it changes (explicit
 // navigation or continuous-scroll tracking alike), letting the caller
 // persist "where was I" without this package needing to know that's what
-// it's for.
-func NewView(win fyne.Window, doc *Document, initialPage int, onPageChanged func(int)) ViewHandle {
+// it's for. onRetargeted, if non-nil, is called after a genuine "Save as a
+// new file..." switches this tab to editing the newly-saved file instead of
+// the original (see retargetTo) — letting the caller update its own
+// path-keyed bookkeeping (tab title, open-files map, recent files) without
+// this package needing to know any of that exists.
+func NewView(win fyne.Window, doc *Document, initialPage int, onPageChanged func(int), onRetargeted func(oldPath, newPath string)) ViewHandle {
 	v := &view{
 		win:            win,
 		doc:            doc,
 		currentPage:    1,
 		onPageChanged:  onPageChanged,
+		onRetargeted:   onRetargeted,
 		zoomLevel:      -1, // default to Fit Width, a sensible first look at any page size
 		highlightColor: defaultHighlightColor,
 	}
@@ -132,11 +138,79 @@ func NewView(win fyne.Window, doc *Document, initialPage int, onPageChanged func
 	}
 
 	return ViewHandle{
-		Content:    content,
-		Close:      func() { _ = doc.Close() },
+		Content: content,
+		// v.doc, not the doc parameter directly: retargetTo can swap v.doc
+		// out for a different *Document mid-session (see its own doc
+		// comment), and this must close whichever one is CURRENT when the
+		// tab actually closes, not whichever one was passed in here —
+		// closing the original after a retarget would double-close an
+		// already-closed Document and leak the replacement's own MuPDF
+		// handle and scratch temp file.
+		Close:      func() { _ = v.doc.Close() },
 		TypedKey:   v.typedKey,
 		SaveDialog: func() { v.panel.showSaveDialog() },
 	}
+}
+
+// retargetTo swaps this tab's Document for a freshly-opened one at newPath.
+// Used after a genuine "Save as a new file..." (never after an overwrite,
+// which keeps editing the same Document/path throughout) — mirrors how
+// Save As behaves in most editors (a saved-as file becomes the one you're
+// now editing), rather than leaving the tab pointed at the original file
+// while its own on-disk bytes have diverged from what's showing. The
+// original file is untouched either way (SaveHighlights/SaveBookmarks never
+// write to it when outputPath differs from the Document's own path) — this
+// only decides which file THIS TAB keeps editing afterward.
+//
+// Closes the old Document (releasing its MuPDF handle and any scratch
+// normalized-copy temp file — see Document.Close) before opening the new
+// one: once Save has actually written newPath, the old Document's own
+// in-memory state has nothing left to do. This does mean any OTHER kind of
+// pending, not-yet-saved edit the old Document was carrying — e.g. a
+// pending Bookmarks change, if this was called from a Highlights-only save,
+// or vice versa — is discarded along with it, since it was never part of
+// what got written to newPath either. Deliberately not wired into
+// bookmarkPanel's own independent Save As for exactly this reason: saving
+// bookmarks alone never applies pending highlight edits, so retargeting
+// there would silently discard them with no way to still save them
+// afterward — a real risk this app's two independent save paths (bookmarks
+// vs. highlights) create that a single unified save wouldn't.
+//
+// Best-effort: if re-opening newPath fails (surprising right after
+// successfully writing it, but not impossible — a permissions or
+// network-drive hiccup), the old Document and tab are left exactly as they
+// were, still fully working — only the "this tab now follows the new file"
+// convenience is skipped, not the save that already succeeded.
+func (v *view) retargetTo(newPath string) error {
+	newDoc, err := Prepare(newPath)
+	if err != nil {
+		return err
+	}
+	oldPath := v.doc.Path()
+	_ = v.doc.Close()
+	v.doc = newDoc
+
+	v.highlights.selected = nil
+	v.doc.SetSelectedHighlight(nil)
+	v.highlights.refreshList()
+
+	v.panel.selected = nil
+	v.panel.tree.UnselectAll()
+	v.panel.rebuildTreeData()
+
+	v.totalLabel.SetText(fmt.Sprintf("/ %d", v.doc.PageCount()))
+	if v.currentPage > v.doc.PageCount() {
+		v.currentPage = v.doc.PageCount()
+	}
+	if v.currentPage < 1 {
+		v.currentPage = 1
+	}
+	v.refreshAllPages()
+
+	if v.onRetargeted != nil {
+		v.onRetargeted(oldPath, newPath)
+	}
+	return nil
 }
 
 // setCurrentPage updates currentPage and reports the change via
@@ -166,6 +240,9 @@ func (v *view) build() fyne.CanvasObject {
 	}
 	v.currentDrawer.OnTapped = func(pos fyne.Position, size fyne.Size) {
 		v.handleHighlightTapped(v.currentPage, pos, size)
+	}
+	v.currentDrawer.OnTappedSecondary = func(pos fyne.Position, size fyne.Size, absPos fyne.Position) {
+		v.handleHighlightSecondaryTapped(v.currentPage, pos, size, absPos)
 	}
 	v.imageScroll = container.NewScroll(v.currentDrawer)
 	v.imageScroll.OnScrolled = func(_ fyne.Position) {

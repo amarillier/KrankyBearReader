@@ -49,9 +49,23 @@ func (d *Document) AddHighlight(page int, quads [][8]float64, rgb [3]float64, ca
 
 // DeleteHighlight removes h — geometry, color, caption, all of it —
 // immediately from the in-memory list and clears the page cache, so it
-// disappears on the very next RenderPage call. If h was already on disk
-// (ObjNr > 0), its object number is queued in pendingHighlightDeletes for
-// removal from the PDF too, applied the next time SaveHighlights runs.
+// disappears on the very next RenderPage call. For a not-yet-saved
+// highlight (ObjNr == 0), that's enough on its own — paintHighlights only
+// ever hand-paints those in the first place. For an already-saved one
+// (ObjNr > 0), RenderPage's base image comes from MuPDF's own real
+// annotation rendering, which would otherwise keep faithfully painting it
+// straight from the file regardless of this in-memory list — confirmed
+// empirically, not just assumed, the first time this was tried (a
+// before/after pixel diff of the same render showed zero difference).
+// Queuing its ObjNr in pendingHighlightDeletes (also used for the real
+// on-disk removal the next time SaveHighlights runs) and rebuilding d.doc
+// (rebuildDoc, in document.go) is what fixes that: the rebuild renders a
+// fresh normalized copy with every pending delete actually removed, and
+// RenderPage renders from that, rather than hand-painting an "erase this
+// region" patch over the previous render — which can't correctly handle
+// this highlight's own bounding box overlapping a different, still-live
+// annotation (confirmed in practice with the first approach tried here;
+// see CLAUDE.md).
 func (d *Document) DeleteHighlight(h *Highlight) bool {
 	for i, existing := range d.Highlights {
 		if existing != h {
@@ -60,6 +74,11 @@ func (d *Document) DeleteHighlight(h *Highlight) bool {
 		d.Highlights = append(d.Highlights[:i], d.Highlights[i+1:]...)
 		if h.ObjNr > 0 {
 			d.pendingHighlightDeletes = append(d.pendingHighlightDeletes, h.ObjNr)
+			// Best-effort: on failure d.doc is left as-is (rebuildDoc's own
+			// doc comment) rather than breaking the delete outright — the
+			// highlight is still gone from d.Highlights and the panel
+			// either way, just without the immediate re-render.
+			_ = d.rebuildDoc()
 		}
 		d.cache.Clear()
 		return true
@@ -67,11 +86,74 @@ func (d *Document) DeleteHighlight(h *Highlight) bool {
 	return false
 }
 
+// highlightDictChanges reports whether h's Contents or Color (Color only
+// for a hasPaintedColor kind — see its own doc comment on why Color is
+// meaningless, at its Go zero value, for any other kind) have diverged
+// from origContents/origColor, the snapshot taken when h was loaded.
+// SaveHighlights uses this to decide whether an existing highlight's dict
+// needs touching at all — see its own doc comment on why "at all" matters,
+// not just "which fields."
+func highlightDictChanges(h *Highlight) (contentsChanged, colorChanged bool) {
+	return h.Contents != h.origContents, hasPaintedColor(h.Kind) && h.Color != h.origColor
+}
+
+// applyPendingHighlightEdits rewrites each already-saved highlight's
+// /Contents and/or /C directly on ctx's own xref table, for exactly the
+// highlights highlightDictChanges reports as actually diverged from what
+// was loaded — never touching one that hasn't changed at all (see
+// highlightDictChanges' and SaveHighlights' own doc comments on why "at
+// all" matters, not just "which fields"). Shared between SaveHighlights
+// (writing the real file) and buildNormalizedDoc (writing a scratch
+// render copy), so a caption/color edit not yet saved shows up identically
+// in both: an immediate re-render via the normalized copy, and the actual
+// saved file once Save runs.
+func applyPendingHighlightEdits(ctx *model.Context, highlights []*Highlight) error {
+	for _, h := range highlights {
+		if h.ObjNr <= 0 {
+			continue
+		}
+		contentsChanged, colorChanged := highlightDictChanges(h)
+		if !contentsChanged && !colorChanged {
+			continue
+		}
+		dict, err := ctx.XRefTable.DereferenceDict(*types.NewIndirectRef(h.ObjNr, 0))
+		if err != nil || dict == nil {
+			continue
+		}
+		if contentsChanged {
+			s, err := types.EscapedUTF16String(h.Contents)
+			if err != nil {
+				return fmt.Errorf("encoding caption for p.%d %s: %w", h.Page, h.Kind, err)
+			}
+			dict.Update("Contents", types.StringLiteral(*s))
+		}
+		if colorChanged {
+			// Color is only ever populated for a kind hasPaintedColor
+			// reports true for (flattenHighlights only calls
+			// highlightGeometry/lineGeometry for those) — for "Note" it's
+			// sitting at its Go zero value, [3]float64{} (black), not that
+			// annotation's real /C. Gating on Kind here, the same way
+			// flattenHighlights gates populating it in the first place,
+			// stops this from silently blackening a Note's real color.
+			dict.Update("C", rgbToSimpleColor(h.Color).Array())
+		}
+	}
+	return nil
+}
+
 // SaveHighlights writes every pending highlight change — captions edited via
-// SetHighlightCaption, new ones added via AddHighlight, and removals via
-// DeleteHighlight — into a fresh read of d.path, saving the result to
-// outputPath. Existing highlights' own geometry/color and every other
-// annotation kind are left untouched.
+// SetHighlightCaption, colors changed via SetHighlightColor, new ones added
+// via AddHighlight, and removals via DeleteHighlight — into a fresh read of
+// d.path, saving the result to outputPath. Existing highlights' own
+// geometry and every other annotation kind are left untouched, and so is
+// an existing highlight's own /Contents or /C when Contents/Color hasn't
+// actually diverged from what was loaded (see origContents/origColor on
+// Highlight) — deliberately, not just as an optimization: rewriting an
+// untouched annotation's dict forces pdfcpu to fully re-emit it rather
+// than copy its bytes through unchanged, which is enough to make Preview
+// stop trusting a Preview-authored annotation's own private editing
+// metadata (see CLAUDE.md's note on this, found the hard way on a real
+// file).
 //
 // pdfcpu's public API has no "update an existing annotation" call, only
 // Add/Remove (see ReleaseNotes' Future ideas), so captions bypass it the
@@ -105,34 +187,12 @@ func (d *Document) SaveHighlights(outputPath string) error {
 		return fmt.Errorf("reading %s: %w", d.path, err)
 	}
 
-	for _, h := range d.Highlights {
-		if h.ObjNr <= 0 {
-			continue
-		}
-		dict, err := ctx.XRefTable.DereferenceDict(*types.NewIndirectRef(h.ObjNr, 0))
-		if err != nil || dict == nil {
-			continue
-		}
-		s, err := types.EscapedUTF16String(h.Contents)
-		if err != nil {
-			return fmt.Errorf("encoding caption for p.%d %s: %w", h.Page, h.Kind, err)
-		}
-		dict.Update("Contents", types.StringLiteral(*s))
-		if h.Kind == "Highlight" {
-			// Color is only ever populated for Kind == "Highlight"
-			// (flattenHighlights only calls highlightGeometry for
-			// model.AnnHighLight) — for every other kind it's sitting at
-			// its Go zero value, [3]float64{} (black), not that
-			// annotation's real /C. Gating on Kind here, the same way
-			// flattenHighlights gates populating it in the first place,
-			// stops SaveHighlights from silently blackening every
-			// Underline/Strikeout/Squiggly/Note's real color.
-			dict.Update("C", rgbToSimpleColor(h.Color).Array())
-		}
+	if err := applyPendingHighlightEdits(ctx, d.Highlights); err != nil {
+		return err
 	}
 
 	if len(d.pendingHighlightDeletes) > 0 {
-		if _, err := pdfcpu.RemoveAnnotations(ctx, nil, nil, d.pendingHighlightDeletes, false); err != nil {
+		if err := removeAnnotationsRepairingIfNeeded(ctx, d.pendingHighlightDeletes); err != nil {
 			return fmt.Errorf("removing highlights: %w", err)
 		}
 	}
@@ -155,6 +215,22 @@ func (d *Document) SaveHighlights(outputPath string) error {
 		}
 	}
 
+	// Deliberately NOT calling api.OptimizeContext here — see CLAUDE.md.
+	// It was added to flatten an already-inconsistent incremental-update
+	// chain (real symptom: a Line's arrowhead and a Highlight's color
+	// both stopped rendering after several rounds of saves), and it did
+	// fix that. It also turned out to actively cause worse damage of its
+	// own: pdfcpu's optimizer prunes any object it doesn't see a live
+	// reference to — but an object referenced ONLY from inside an
+	// annotation's opaque, app-private data (e.g. Preview's own
+	// AAPL:AKExtras metadata) looks unreferenced to it, so it got pruned
+	// silently. That's degraded Preview's own rendering of an annotation
+	// it authored, and on a real file it eventually made ANY future
+	// annotation removal on that page fail outright ("missing xref table
+	// entry" — see removeAnnotationsRepairingIfNeeded) once enough saves
+	// had compounded. A cosmetic "needs repair" warning MuPDF silently
+	// handles on its own is a far smaller problem than a hard, blocking
+	// save failure — not worth risking to fix.
 	if err := writeContextAtomically(ctx, outputPath); err != nil {
 		return err
 	}
@@ -166,6 +242,32 @@ func (d *Document) SaveHighlights(outputPath string) error {
 		}
 		d.Highlights = reloaded
 		d.pendingHighlightDeletes = nil
+
+		// The real file now has every pending edit actually applied, so
+		// rebuild d.doc from the freshly-saved bytes — the reloaded
+		// Highlights all have origContents/origColor matching their new
+		// Contents/Color (see LoadHighlights), so this rebuild is pure
+		// normalization, not a re-application of anything (see rebuildDoc's
+		// own doc comment for why normalizing at all, even with nothing
+		// pending, still matters). Best-effort: a failure here leaves the
+		// previous d.doc in place rather than failing the save itself, which
+		// already succeeded.
+		_ = d.rebuildDoc()
+
+		// Every already-rendered page in the cache was rendered from
+		// d.path's PREVIOUS on-disk bytes, which this save just replaced —
+		// found necessary the hard way, not preemptively: a page viewed
+		// before Save to PDF kept showing its pre-save render until the
+		// tab was fully closed and reopened, since nothing was clearing
+		// this cache to force a fresh RenderPage call for pages already in
+		// it. RenderPage's own cache key is only (page, zoom), with no
+		// notion of "which save wrote the file this came from" — so the
+		// only correct fix is to drop everything, the same as
+		// AddHighlight/DeleteHighlight/SetHighlightColor already do for
+		// the one page they know they changed, just for every page at
+		// once, since a save can change what's on any of them, not just
+		// the highlights this app knows it edited.
+		d.cache.Clear()
 	}
 	return nil
 }
@@ -197,10 +299,115 @@ func writeContextAtomically(ctx *model.Context, outputPath string) error {
 	return nil
 }
 
+// removeAnnotationsRepairingIfNeeded calls pdfcpu.RemoveAnnotations, and if
+// that fails, repairs any dangling indirect reference found anywhere in
+// ctx's own xref table (repairDanglingIndirectReferences) and retries
+// exactly once. Found necessary the hard way, not preemptively: pdfcpu's
+// own removal path validates the FULL object graph reachable from a
+// page's annotations before allowing a removal — including inside opaque,
+// app-private data this app has no reason to understand, e.g. Preview's
+// own AAPL:AKExtras annotation metadata — and hard-fails on the very first
+// unresolvable reference it finds, with no lenient mode. A real file hit
+// this: some earlier save (most likely one of this app's own now-removed
+// OptimizeContext calls — see CLAUDE.md) had silently pruned an object
+// only reachable via a private blob's own embedded copy of a reference,
+// and the very next annotation deletion on that page failed outright with
+// "missing xref table entry" — blocking deletion entirely until repaired.
+//
+// The repair pass only runs on this fallback path, not proactively on
+// every call: it's a full linear scan of the document's own object graph,
+// real cost on a large PDF, and most saves never hit this at all.
+func removeAnnotationsRepairingIfNeeded(ctx *model.Context, objNrs []int) error {
+	_, err := pdfcpu.RemoveAnnotations(ctx, nil, nil, objNrs, false)
+	if err == nil {
+		return nil
+	}
+	if _, repairErr := repairDanglingIndirectReferences(ctx); repairErr != nil {
+		return fmt.Errorf("%w (repair attempt also failed: %v)", err, repairErr)
+	}
+	if _, err := pdfcpu.RemoveAnnotations(ctx, nil, nil, objNrs, false); err != nil {
+		return fmt.Errorf("%w (still failing after repair)", err)
+	}
+	return nil
+}
+
+// repairDanglingIndirectReferences scans every object already in ctx's
+// own xref table and follows every indirect reference reachable from it —
+// including inside opaque, app-private data this app has no reason to
+// understand — inserting an empty placeholder dict for any reference that
+// doesn't resolve to anything. It doesn't need to know what the missing
+// object WAS; an empty dict is enough to satisfy "does this reference
+// resolve to something," which is all pdfcpu's own removal validator
+// actually checks (see removeAnnotationsRepairingIfNeeded's doc comment).
+func repairDanglingIndirectReferences(ctx *model.Context) (repaired int, err error) {
+	visited := map[int]bool{}
+
+	var walkObject func(types.Object) error
+	var walkRef func(types.IndirectRef) error
+
+	walkRef = func(ref types.IndirectRef) error {
+		objNr := ref.ObjectNumber.Value()
+		if visited[objNr] {
+			return nil
+		}
+		visited[objNr] = true
+		if _, found := ctx.XRefTable.FindTableEntryLight(objNr); !found {
+			if _, err := ctx.XRefTable.IndRefForObject(objNr, types.Dict{}); err != nil {
+				return err
+			}
+			repaired++
+			return nil
+		}
+		resolved, err := ctx.XRefTable.Dereference(ref)
+		if err != nil || resolved == nil {
+			return nil // already broken some other way -- not this pass's job
+		}
+		return walkObject(resolved)
+	}
+
+	walkObject = func(o types.Object) error {
+		switch v := o.(type) {
+		case types.IndirectRef:
+			return walkRef(v)
+		case types.Dict:
+			for _, val := range v {
+				if err := walkObject(val); err != nil {
+					return err
+				}
+			}
+		case types.StreamDict:
+			for _, val := range v.Dict {
+				if err := walkObject(val); err != nil {
+					return err
+				}
+			}
+		case types.Array:
+			for _, val := range v {
+				if err := walkObject(val); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+
+	for objNr := range ctx.XRefTable.Table {
+		if err := walkRef(*types.NewIndirectRef(objNr, 0)); err != nil {
+			return repaired, err
+		}
+	}
+
+	return repaired, nil
+}
+
 // SetHighlightCaption updates h's in-memory caption (its /Contents comment)
-// immediately — mirrors BookmarkManager.RenameBookmark. Nothing reaches disk
-// until SaveHighlights runs. Unlike a bookmark title, blank is accepted: it
-// clears the caption.
+// immediately — mirrors BookmarkManager.RenameBookmark. Unlike a bookmark
+// title, blank is accepted: it clears the caption. Nothing reaches disk
+// until SaveHighlights runs. Deliberately does NOT rebuild d.doc the way
+// SetHighlightColor does: a caption isn't painted on the page at all (only
+// listed in the Highlights panel), so there's nothing a rebuild could make
+// visible sooner — it would just be a real read+write+reopen round trip
+// paid for zero visual benefit.
 func (d *Document) SetHighlightCaption(h *Highlight, caption string) {
 	h.Contents = caption
 }
@@ -209,9 +416,23 @@ func (d *Document) SetHighlightCaption(h *Highlight, caption string) {
 // immediately and clears the page cache so the new color paints on the
 // very next RenderPage call — mirrors AddHighlight/DeleteHighlight. Nothing
 // reaches disk until SaveHighlights runs, which rewrites every existing
-// highlight's /C from this same field (see SaveHighlights).
+// highlight's /C from this same field (see SaveHighlights). For an
+// already-saved highlight (ObjNr > 0), RenderPage's base image comes from
+// MuPDF's own real annotation rendering (see CLAUDE.md) — rebuilding d.doc
+// (rebuildDoc) is what makes buildNormalizedDoc delete this highlight from
+// the scratch copy it renders from, so paintHighlights can hand-paint its
+// new color instead of MuPDF faithfully repainting its old, still-on-disk
+// one. A bare /C update alone would NOT be enough here — confirmed
+// empirically on a real annotation with its own baked /AP appearance
+// stream, MuPDF's real rendering paints from that stream regardless of
+// /C — see buildNormalizedDoc's own doc comment. Best-effort: a rebuild
+// failure leaves the previous d.doc in place, same as
+// DeleteHighlight/SaveHighlights.
 func (d *Document) SetHighlightColor(h *Highlight, rgb [3]float64) {
 	h.Color = rgb
+	if h.ObjNr > 0 {
+		_ = d.rebuildDoc()
+	}
 	d.cache.Clear()
 }
 

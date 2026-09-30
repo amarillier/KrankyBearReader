@@ -2,6 +2,7 @@ package pdf
 
 import (
 	"image"
+	"image/color"
 	"testing"
 
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
@@ -115,5 +116,260 @@ func TestHighlightGeometry_MissingObjectFallsBackGracefully(t *testing.T) {
 	}
 	if col != defaultHighlightColor {
 		t.Errorf("expected default color for objNr<=0, got %v", col)
+	}
+}
+
+func TestPaintableMarkupKinds_HasQuadKindsOnlyNotNote(t *testing.T) {
+	want := map[string]bool{"Highlight": true, "Underline": true, "Strikeout": true, "Squiggly": true}
+	if len(paintableMarkupKinds) != len(want) {
+		t.Fatalf("expected %d paintable kinds, got %d: %v", len(want), len(paintableMarkupKinds), paintableMarkupKinds)
+	}
+	for k, v := range want {
+		if paintableMarkupKinds[k] != v {
+			t.Errorf("paintableMarkupKinds[%q] = %v, want %v", k, paintableMarkupKinds[k], v)
+		}
+	}
+	if paintableMarkupKinds["Note"] {
+		t.Errorf("expected Note to stay excluded from paintableMarkupKinds — it has no quads to paint")
+	}
+}
+
+// TestMarkupLineRect_OrdersUnderlineBelowStrikeout guards the fraction
+// constants' relative placement, not their exact values: for the same quad,
+// Underline (near the text's baseline) must land at a larger pixel Y (lower
+// on the page image, since image Y grows downward) than Strikeout (near the
+// text's vertical middle) — getting underlineFrac/strikeoutFrac backwards
+// would silently draw an underline through mid-text and a strikeout at the
+// baseline instead.
+func TestMarkupLineRect_OrdersUnderlineBelowStrikeout(t *testing.T) {
+	q := [8]float64{0, 10, 10, 10, 0, 0, 10, 0} // quad spanning y=[0,10] on a 10pt-tall page
+	under := markupLineRect(q, underlineFrac, 10, 1)
+	strike := markupLineRect(q, strikeoutFrac, 10, 1)
+	if under.Min.Y <= strike.Min.Y {
+		t.Errorf("expected underline (baseline) below strikeout (mid-height) in image space, got under=%v strike=%v", under, strike)
+	}
+}
+
+// TestMarkupLineRect_StaysWithinQuadWidth confirms the rect spans exactly
+// the quad's own X range at the given scale, the same axis-aligned-bbox
+// convention quadPixelRect uses.
+func TestMarkupLineRect_StaysWithinQuadWidth(t *testing.T) {
+	q := [8]float64{0, 10, 10, 10, 0, 0, 10, 0}
+	r := markupLineRect(q, underlineFrac, 10, 2) // 2x scale
+	if r.Min.X != 0 || r.Max.X != 20 {
+		t.Errorf("expected X range [0,20] at 2x scale, got [%d,%d]", r.Min.X, r.Max.X)
+	}
+}
+
+// TestDrawSquigglyLine_PaintsWithinItsOwnBounds is a smoke test for the
+// per-pixel-column wave draw: it must actually paint something inside the
+// bounding rect it returns (a regression against a phase/amplitude bug
+// that computes a rect but never touches a pixel), and must leave pixels
+// well outside the quad's own X range untouched, not flood the whole image.
+func TestDrawSquigglyLine_PaintsWithinItsOwnBounds(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 20, 20))
+	q := [8]float64{0, 8, 10, 8, 0, 4, 10, 4} // quad width 10pt, height 4pt
+	col := color.NRGBA{R: 255, A: 200}
+
+	r := drawSquigglyLine(img, q, 20, 1, col)
+	if r.Empty() {
+		t.Fatalf("expected a non-empty bounding rect, got %v", r)
+	}
+
+	painted := false
+	for y := r.Min.Y; y < r.Max.Y; y++ {
+		for x := r.Min.X; x < r.Max.X; x++ {
+			if img.RGBAAt(x, y).A > 0 {
+				painted = true
+			}
+		}
+	}
+	if !painted {
+		t.Errorf("expected at least one pixel painted within bounding rect %v, found none", r)
+	}
+
+	if got := img.RGBAAt(19, 19); got.A != 0 {
+		t.Errorf("expected pixels outside the quad's own width to stay untouched, got %v", got)
+	}
+}
+
+func TestHasPaintedColor_IncludesLineAlongsideQuadKinds(t *testing.T) {
+	for kind, want := range map[string]bool{
+		"Highlight": true, "Underline": true, "Strikeout": true, "Squiggly": true,
+		"Line": true, "Note": false,
+	} {
+		if got := hasPaintedColor(kind); got != want {
+			t.Errorf("hasPaintedColor(%q) = %v, want %v", kind, got, want)
+		}
+	}
+}
+
+// TestClampLinePointsToRect_MirrorsOutOfRangeEndpointFromTheGoodOne guards
+// the real bug found via a real PDF (see ReleaseNotes' Version 0.5.0
+// notes): a macOS Preview-authored arrow's /L had one endpoint whose Y sat
+// ~145pt above its own /Rect's top edge (and off the page entirely) —
+// almost certainly stale from an earlier edit that resized /Rect without
+// updating /L. The repair must mirror the bad Y from the other, in-range
+// endpoint's own Y (667.08, which happens to sit almost exactly at rect's
+// vertical midpoint 666.92 — the actual clue this repair is based on, see
+// clampLinePointsToRect's doc comment), not clamp it to rect's far edge
+// (687.67) — that edge is a full ~20pt further from the good endpoint's
+// value than the repair should land.
+func TestClampLinePointsToRect_MirrorsOutOfRangeEndpointFromTheGoodOne(t *testing.T) {
+	points := []float64{482.39, 667.08, 366.07, 833.33}
+	rect := &[4]float64{290.29, 646.17, 491.86, 687.67}
+
+	got := clampLinePointsToRect(points, rect)
+	want := []float64{482.39, 667.08, 366.07, 667.08}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("clampLinePointsToRect(...)[%d] = %v, want %v (full: got=%v want=%v)", i, got[i], want[i], got, want)
+		}
+	}
+}
+
+func TestClampLinePointsToRect_LeavesInRangePointsUntouched(t *testing.T) {
+	points := []float64{10, 10, 20, 20}
+	rect := &[4]float64{0, 0, 100, 100}
+	got := clampLinePointsToRect(points, rect)
+	for i, v := range points {
+		if got[i] != v {
+			t.Errorf("clampLinePointsToRect(...)[%d] = %v, want unchanged %v", i, got[i], v)
+		}
+	}
+}
+
+func TestParseRectPt_RejectsWrongLength(t *testing.T) {
+	xRefTable := &model.XRefTable{}
+	cases := []types.Array{nil, {}, {types.Float(1), types.Float(2)}}
+	for _, c := range cases {
+		if got := parseRectPt(xRefTable, c); got != nil {
+			t.Errorf("parseRectPt(%v) = %v, want nil", c, got)
+		}
+	}
+}
+
+func TestParseRectPt_ValidArray(t *testing.T) {
+	xRefTable := &model.XRefTable{}
+	got := parseRectPt(xRefTable, types.Array{types.Float(1), types.Float(2), types.Float(3), types.Float(4)})
+	want := &[4]float64{1, 2, 3, 4}
+	if got == nil || *got != *want {
+		t.Errorf("parseRectPt = %v, want %v", got, want)
+	}
+}
+
+// TestStrokeLine_PaintsBothEndpoints is a smoke test for the shaft-drawing
+// helper reused by both a Line annotation's body and its open-arrowhead
+// sides: it must actually paint pixels near both endpoints, not just
+// somewhere along the way (a regression against an off-by-one in the step
+// count leaving an endpoint unpainted).
+func TestStrokeLine_PaintsBothEndpoints(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 20, 20))
+	col := color.NRGBA{R: 255, A: 200}
+	r := strokeLine(img, [2]float64{2, 2}, [2]float64{16, 16}, 2, col)
+	if r.Empty() {
+		t.Fatalf("expected a non-empty bounding rect, got %v", r)
+	}
+	if img.RGBAAt(2, 2).A == 0 {
+		t.Errorf("expected the start point to be painted, found nothing at (2,2)")
+	}
+	if img.RGBAAt(16, 16).A == 0 {
+		t.Errorf("expected the end point to be painted, found nothing at (16,16)")
+	}
+}
+
+// TestFillTriangle_PaintsInteriorNotJustBounds confirms the scanline fill
+// actually paints the triangle's interior (e.g. its centroid), not merely
+// pixels along its bounding box's edges.
+func TestFillTriangle_PaintsInteriorNotJustBounds(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 20, 20))
+	col := color.NRGBA{R: 255, A: 200}
+	p0, p1, p2 := [2]float64{2, 2}, [2]float64{18, 2}, [2]float64{10, 18}
+	r := fillTriangle(img, p0, p1, p2, col)
+	if r.Empty() {
+		t.Fatalf("expected a non-empty bounding rect, got %v", r)
+	}
+	cx, cy := int((p0[0]+p1[0]+p2[0])/3), int((p0[1]+p1[1]+p2[1])/3)
+	if img.RGBAAt(cx, cy).A == 0 {
+		t.Errorf("expected the triangle's centroid (%d,%d) to be painted, found nothing", cx, cy)
+	}
+}
+
+// TestDrawArrowHead_SkipsUnrecognizedStyles guards the "None"/unrecognized
+// fallback: nothing should be painted for a style this app doesn't draw an
+// arrowhead for, matching how an absent /LE (defaulting to "None") is
+// already handled.
+func TestDrawArrowHead_SkipsUnrecognizedStyles(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 20, 20))
+	col := color.NRGBA{R: 255, A: 200}
+	for _, style := range []string{"None", "Square", "Diamond", ""} {
+		if r := drawArrowHead(img, [2]float64{10, 10}, [2]float64{2, 2}, style, 2, col); !r.Empty() {
+			t.Errorf("drawArrowHead(style=%q) = %v, want an empty rect (nothing drawn)", style, r)
+		}
+	}
+}
+
+// TestDrawArrowHead_ClosedArrowFillsInteriorOpenArrowDoesNot confirms the
+// two recognized arrow styles actually differ visually: "ClosedArrow"
+// fills the whole triangle including its interior (fillTriangle), while
+// "OpenArrow" only strokes its two outer sides (strokeLine), leaving the
+// interior untouched near the triangle's base — its two sides start
+// together at the tip (so both styles paint near there regardless) but
+// diverge well past the strokes' own width by the base. For
+// tip=(30,20)/from=(5,20)/thickness=3, (21,20) sits near the base's own
+// midline and was confirmed (via a pixel-map dump while writing this test,
+// not derived by hand — the diagonal square-stamped strokes in strokeLine
+// don't paint a simple perpendicular-distance band) to be filled for
+// ClosedArrow and empty for OpenArrow.
+func TestDrawArrowHead_ClosedArrowFillsInteriorOpenArrowDoesNot(t *testing.T) {
+	paintedAt := func(style string, x, y int) bool {
+		img := image.NewRGBA(image.Rect(0, 0, 40, 40))
+		col := color.NRGBA{R: 255, A: 200}
+		drawArrowHead(img, [2]float64{30, 20}, [2]float64{5, 20}, style, 3, col)
+		return img.RGBAAt(x, y).A > 0
+	}
+	if !paintedAt("ClosedArrow", 21, 20) {
+		t.Errorf("expected ClosedArrow to fill its own interior near the base, found nothing")
+	}
+	if paintedAt("OpenArrow", 21, 20) {
+		t.Errorf("expected OpenArrow to leave its interior unfilled near the base (only the two sides stroked), found paint there")
+	}
+}
+
+// TestLineBoundsPixelRect_PerfectlyAxisAlignedLineIsNeverEmpty is the real
+// regression test for a bug found via hands-on testing against a real
+// PDF: a perfectly vertical (or horizontal) Line annotation's own two
+// endpoints share one coordinate exactly, so the naive scaled rect has
+// that axis's width or height at literally zero — and
+// image.Rectangle.Empty() reports ANY zero-width-or-height rectangle as
+// empty, which drawRectOutline (paintHighlights' selection indicator)
+// treats as "nothing to draw" and skips entirely. Confirmed on the real
+// file that surfaced this: selecting that Line in the Highlights panel
+// never outlined it on the page at all — zero pixels painted, not just a
+// hard-to-notice thin one.
+func TestLineBoundsPixelRect_PerfectlyAxisAlignedLineIsNeverEmpty(t *testing.T) {
+	vertical := []float64{373.0899, 521.1978, 373.0899, 451.413} // the real annotation's own /L
+	horizontal := []float64{100, 200, 300, 200}
+
+	for _, points := range [][]float64{vertical, horizontal} {
+		r := lineBoundsPixelRect(points, 756.0, 150.0/72.0)
+		if r.Empty() {
+			t.Errorf("lineBoundsPixelRect(%v) = %v, want a non-empty rect", points, r)
+		}
+		if r.Dx() < minLineOutlinePx || r.Dy() < minLineOutlinePx {
+			t.Errorf("lineBoundsPixelRect(%v) = %v, want both Dx and Dy >= %d", points, r, minLineOutlinePx)
+		}
+	}
+}
+
+// TestDrawLineAnnotation_MalformedPointsPaintsNothing mirrors the
+// "malformed geometry -> list without painting" convention parseQuadPoints
+// and parseLinePoints already follow.
+func TestDrawLineAnnotation_MalformedPointsPaintsNothing(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 20, 20))
+	col := color.NRGBA{R: 255, A: 200}
+	r := drawLineAnnotation(img, []float64{1, 2, 3}, [2]string{"None", "None"}, 1, col, 20, 1)
+	if !r.Empty() {
+		t.Errorf("expected an empty rect for malformed points, got %v", r)
 	}
 }

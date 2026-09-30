@@ -151,21 +151,24 @@ func (hp *highlightsPanel) editSelected() {
 }
 
 // changeSelectedColor recolors the selected highlight and repaints it
-// immediately (Document.SetHighlightColor also clears the render cache).
-// Only Kind == "Highlight" actually paints on the page or writes a /C on
-// save (see SaveHighlights) — Underline/Strikeout/Squiggly/Note aren't
-// painted by this app at all yet (see ReleaseNotes' Future ideas), so
-// recoloring one would have no visible effect and is refused up front
-// rather than silently doing nothing.
+// immediately (Document.SetHighlightColor also clears the render cache and,
+// for an already-saved highlight, rebuilds d.doc from a normalized scratch
+// copy with the old annotation removed — see its own doc comment — so the
+// new color shows on the very next repaint regardless of whether h has
+// been saved yet). Only a hasPaintedColor kind (Highlight, Underline,
+// Strikeout, Squiggly, Line) actually paints on the page or writes a /C on
+// save (see SaveHighlights) — "Note" (Text/Popup) isn't painted by this app
+// at all, so recoloring one would have no visible effect and is refused up
+// front rather than silently doing nothing.
 func (hp *highlightsPanel) changeSelectedColor() {
 	h := hp.selected
 	if h == nil {
 		dialog.ShowInformation("No Selection", "Please select a highlight to recolor", hp.v.win)
 		return
 	}
-	if h.Kind != "Highlight" {
+	if !hasPaintedColor(h.Kind) {
 		dialog.ShowInformation("Not supported",
-			fmt.Sprintf("%s annotations aren't painted on the page yet, so there's no color to change.", h.Kind),
+			fmt.Sprintf("%s annotations aren't painted on the page, so there's no color to change.", h.Kind),
 			hp.v.win)
 		return
 	}
@@ -175,10 +178,15 @@ func (hp *highlightsPanel) changeSelectedColor() {
 	})
 }
 
-// deleteSelected removes the selected highlight from the page immediately
-// (Document.DeleteHighlight also clears the render cache, so it disappears
-// on the very next repaint) — mirroring bookmarkPanel.deleteSelected. Not
-// written back into the PDF file itself until Save to PDF runs.
+// deleteSelected removes the selected highlight from the list and clears
+// it from the render cache immediately (Document.DeleteHighlight) —
+// mirroring bookmarkPanel.deleteSelected. Disappears from the page on the
+// very next repaint too, whether or not it was already saved:
+// paintHighlights hand-paints a not-yet-saved one directly, and
+// punchOutPendingDeletes erases an already-saved one's on-page paint back
+// to plain content (its removal from the file itself still doesn't happen
+// until Save to PDF, but the page visibly matches either way in the
+// meantime — see DeleteHighlight's doc comment).
 func (hp *highlightsPanel) deleteSelected() {
 	h := hp.selected
 	if h == nil {
@@ -253,9 +261,32 @@ func (hp *highlightsPanel) showSaveAsDialog() {
 	fd.Show()
 }
 
+// saveChangesTo writes pending highlight edits to outputPath. When
+// outputPath differs from the Document's own path (a real "Save as a new
+// file...", not an overwrite), this also retargets the tab to the
+// newly-saved file (view.retargetTo) — so the tab now follows the file
+// that was actually just saved, the same way Save As behaves in most
+// editors, rather than continuing to show the original file while its own
+// bytes have diverged from what's on screen. The original file is left
+// exactly as it was either way; SaveHighlights never writes to it when
+// outputPath differs from its own path.
 func (hp *highlightsPanel) saveChangesTo(outputPath string) {
+	origPath := hp.v.doc.Path()
 	if err := hp.v.doc.SaveHighlights(outputPath); err != nil {
 		dialog.ShowError(fmt.Errorf("failed to save: %w", err), hp.v.win)
+		return
+	}
+	if outputPath != origPath {
+		if err := hp.v.retargetTo(outputPath); err != nil {
+			// The save itself already succeeded — outputPath is a real,
+			// correctly-saved file. Only the "switch this tab to it"
+			// convenience failed, so this is a soft heads-up, not the
+			// hard dialog.ShowError above.
+			hp.showTransientInfo("Saved", fmt.Sprintf(
+				"Saved to:\n%s\n\nCouldn't switch this tab to it: %v", outputPath, err))
+			return
+		}
+		hp.showTransientInfo("Success", fmt.Sprintf("Saved to:\n%s", outputPath))
 		return
 	}
 	hp.refreshList()

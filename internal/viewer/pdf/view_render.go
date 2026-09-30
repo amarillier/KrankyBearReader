@@ -175,6 +175,26 @@ func (v *view) repaintPage(page int) {
 	}
 }
 
+// refreshAllPages forces every page — not just the current one — to
+// re-render on the next paint, unlike repaintPage's single-page targeting.
+// Used by retargetTo after swapping in an entirely different Document: any
+// page could show different content now, not only whichever one happened
+// to be on screen at the time.
+func (v *view) refreshAllPages() {
+	if v.continuous {
+		for _, img := range v.pageImages {
+			if img != nil {
+				img.Image = nil
+			}
+		}
+		v.lazyRenderVisible()
+		return
+	}
+	if err := v.renderCurrentPage(); err != nil {
+		dialog.ShowError(err, v.win)
+	}
+}
+
 // setHighlightMode toggles Draw Highlight mode: while on, dragging on the
 // page creates a new highlight (see highlightDrawer.Dragged/DragEnd);
 // while off, dragging on the page does nothing, same as before this
@@ -232,6 +252,36 @@ func (v *view) handleHighlightTapped(page int, pos fyne.Position, widgetSize fyn
 			return
 		}
 	}
+}
+
+// handleHighlightSecondaryTapped is every highlightDrawer.OnTappedSecondary's
+// target: right-click (or long-press) a highlight/shape directly on the
+// page to select it — the exact same hit test and selection as a plain
+// left click (handleHighlightTapped) — and immediately show a small
+// context menu at the cursor, so deleting one doesn't require first
+// selecting it here, then reaching over to the Highlights panel's own
+// Delete button. Only offers Delete for now, matching the request that
+// motivated this; Change Color already has its own dedicated swatch/button
+// and doesn't need a second way to reach it.
+func (v *view) handleHighlightSecondaryTapped(page int, pos fyne.Position, widgetSize fyne.Size, absolutePos fyne.Position) {
+	pageW, pageH, err := v.doc.PageBoundsPt(page)
+	if err != nil {
+		return
+	}
+	x, y := widgetPointToPDF(pos, widgetSize, pageW, pageH)
+	h := v.doc.HighlightAt(page, x, y)
+	if h == nil {
+		return
+	}
+	for i, candidate := range v.doc.Highlights {
+		if candidate == h {
+			v.highlights.list.Select(i)
+			break
+		}
+	}
+
+	menu := fyne.NewMenu("", fyne.NewMenuItem("Delete", v.highlights.deleteSelected))
+	widget.ShowPopUpMenuAtPosition(menu, v.win.Canvas(), absolutePos)
 }
 
 func (v *view) applyFitWidth(imgW, imgH int) {
@@ -388,6 +438,9 @@ func (v *view) buildContinuousPages() {
 		drawer.OnTapped = func(pos fyne.Position, size fyne.Size) {
 			v.handleHighlightTapped(page, pos, size)
 		}
+		drawer.OnTappedSecondary = func(pos fyne.Position, size fyne.Size, absPos fyne.Position) {
+			v.handleHighlightSecondaryTapped(page, pos, size, absPos)
+		}
 		v.pageDrawers[i] = drawer
 		objs[i] = drawer
 	}
@@ -542,5 +595,16 @@ func (v *view) typedKey(ev *fyne.KeyEvent) {
 		v.jumpToPage(1)
 	case fyne.KeyEnd:
 		v.jumpToPage(v.doc.PageCount())
+	case fyne.KeyDelete, fyne.KeyBackspace:
+		// Deletes whichever highlight is currently selected — via the
+		// Highlights panel's own list, a page click, or a right-click's
+		// select-then-menu (see handleHighlightSecondaryTapped) — all three
+		// keep highlights.selected in sync through the same list.Select
+		// call. Silently does nothing with no selection, rather than
+		// popping deleteSelected's own "No Selection" dialog for an
+		// unrelated stray Delete/Backspace keypress.
+		if v.highlights.selected != nil {
+			v.highlights.deleteSelected()
+		}
 	}
 }
