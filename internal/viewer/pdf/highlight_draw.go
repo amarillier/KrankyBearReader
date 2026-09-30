@@ -16,11 +16,14 @@ import (
 // to a single-quad PDF highlight once the drag ends (see view.go's
 // wireHighlightDrawing).
 //
-// Always wraps the image, even when Enabled is false: dragging on a plain
-// *canvas.Image was already a no-op before this widget existed (Image
-// doesn't implement fyne.Draggable), so wrapping it costs nothing while
-// highlight-drawing mode is off — Dragged/DragEnd just return immediately,
-// same as today's behavior.
+// Always wraps the image, even when Enabled is false: a plain *canvas.Image
+// doesn't implement fyne.Draggable at all, so wrapping it costs nothing
+// while highlight-drawing mode is off. Dragged/DragEnd still run in that
+// state (see their own doc comments) — for click-to-select's sake, not
+// drawing's: Fyne decides Tapped vs. Dragged+DragEnd purely by how much the
+// pointer physically moved, independent of Enabled, so DragEnd needs to
+// recognize a near-stationary "drag" and treat it as the tap it was, even
+// with drawing mode off.
 type highlightDrawer struct {
 	widget.BaseWidget
 	image   *canvas.Image
@@ -28,11 +31,15 @@ type highlightDrawer struct {
 
 	Enabled bool
 	// OnDrawn fires once a drag ends with a non-trivial size, with the
-	// rectangle's two corners plus this widget's current Size(), all in
-	// this widget's own coordinate space (points, matching image.Size() —
-	// whatever MinSize the page is currently displayed at, not the
-	// underlying image's raw pixel size) — see widgetRectToQuad.
-	OnDrawn func(topLeft, bottomRight fyne.Position, widgetSize fyne.Size)
+	// gesture's own RAW start and end points (not normalized into
+	// top-left/bottom-right — direction is preserved, e.g. a Line/arrow
+	// shape needs to know which end the user actually dragged FROM versus
+	// TO) plus the image's own natural size, both already corrected for
+	// any centering offset (see imageLocalPos) — the caller normalizes
+	// into a rectangle itself for any shape kind that doesn't care about
+	// direction (widgetRectToQuad's own callers do this via
+	// rectTopLeft/rectBottomRight).
+	OnDrawn func(start, end fyne.Position, widgetSize fyne.Size)
 
 	// OnTapped fires on a plain click (no drag) — a click-to-select
 	// gesture, independent of Enabled/Draw Highlight mode: selecting an
@@ -92,27 +99,56 @@ func (d *highlightDrawer) CreateRenderer() fyne.WidgetRenderer {
 // page image's own first render), so by the time a drag ever starts, its
 // canvas is already known and Resize's own built-in repaint call (see
 // fyne's canvas.Rectangle.Resize) reliably reaches the screen.
+//
+// Always tracks the gesture's own start/current position, regardless of
+// Enabled — DragEnd needs that even while Draw Highlight mode is off, to
+// tell a near-stationary "drag" (Fyne's own jitter tolerance, not this
+// app's) apart from one Fyne never delivered at all. Only the live-preview
+// overlay itself is gated on Enabled: no highlight-draw preview should
+// appear while that mode is off.
 func (d *highlightDrawer) Dragged(e *fyne.DragEvent) {
-	if !d.Enabled {
-		return
-	}
 	if !d.dragging {
 		d.dragging = true
 		d.start = fyne.NewPos(e.Position.X-e.Dragged.DX, e.Position.Y-e.Dragged.DY)
 	}
 	d.cur = e.Position
-	d.overlay.Move(rectTopLeft(d.start, d.cur))
-	d.overlay.Resize(rectSize(d.start, d.cur))
+	if d.Enabled {
+		d.overlay.Move(rectTopLeft(d.start, d.cur))
+		d.overlay.Resize(rectSize(d.start, d.cur))
+	}
 }
 
 // minDragPts guards against an accidental click-with-tiny-jitter being
-// treated as a deliberate highlight.
+// treated as a deliberate highlight — and, since DragEnd below, is also
+// the threshold for treating that same tiny jitter as the tap it actually
+// was.
 const minDragPts = 4
 
-// DragEnd finalizes the drag, firing OnDrawn if it's big enough to be
-// deliberate. Fyne calls DragEnd at the end of every drag gesture, even one
-// this widget never started reacting to (mode was off, or Dragged never
+// DragEnd finalizes the drag: fires OnDrawn if it's big enough in BOTH
+// dimensions to be a deliberate highlight rectangle (and Enabled); fires
+// OnTapped instead if it's small in BOTH dimensions (see below); does
+// nothing for a real, sizeable movement in only one axis (neither a
+// rectangle nor a tap). Fyne calls DragEnd at the end of every drag
+// gesture, even one this widget never started reacting to (Dragged never
 // ran) — the dragging guard makes that a no-op.
+//
+// The near-stationary -> OnTapped fallback is not optional polish: Fyne
+// decides whether a given click-and-release is a Tapped or a
+// Dragged+DragEnd gesture purely by how much the pointer physically moved
+// during the press — a decision this widget has no say in and that
+// happens BEFORE Tapped/Dragged is even called, regardless of Enabled or
+// what either handler does. A real click with a hair of jitter (common on
+// a trackpad -- and, non-obviously, MORE likely for a careful, deliberate
+// click on a small/precise target than a quick tap on a big one) gets
+// routed through Dragged/DragEnd instead of Tapped. Before this fix,
+// DragEnd's own "too small to be deliberate" check just returned without
+// doing anything else -- meaning Tapped's whole click-to-select gesture
+// silently never fired for that click at all, no error, no visual
+// feedback, nothing. Found via real user testing, not speculatively: a
+// thin Line annotation's on-page click-to-select was wildly unreliable --
+// "click all over ... can't get it to select" -- succeeding only on an
+// occasional, perfectly jitter-free click, while the Highlights panel's
+// own list-based selection (an unrelated gesture path) worked every time.
 func (d *highlightDrawer) DragEnd() {
 	if !d.dragging {
 		return
@@ -121,19 +157,66 @@ func (d *highlightDrawer) DragEnd() {
 	tl, br := rectTopLeft(d.start, d.cur), rectBottomRight(d.start, d.cur)
 	d.overlay.Resize(fyne.NewSize(0, 0))
 
-	if br.X-tl.X < minDragPts || br.Y-tl.Y < minDragPts {
+	dx, dy := br.X-tl.X, br.Y-tl.Y
+	if dx < minDragPts && dy < minDragPts {
+		if d.OnTapped != nil {
+			pos, size := d.imageLocalPos(d.cur)
+			d.OnTapped(pos, size)
+		}
+		return
+	}
+	if dx < minDragPts || dy < minDragPts || !d.Enabled {
 		return
 	}
 	if d.OnDrawn != nil {
-		d.OnDrawn(tl, br, d.Size())
+		// Raw d.start/d.cur, NOT the normalized tl/br above (those exist
+		// only for the magnitude check just above) — see OnDrawn's own
+		// doc comment for why direction matters to some callers.
+		startPos, size := d.imageLocalPos(d.start)
+		endPos, _ := d.imageLocalPos(d.cur)
+		d.OnDrawn(startPos, endPos, size)
 	}
+}
+
+// imageLocalPos converts pos (this widget's own local coordinate space,
+// i.e. relative to d's top-left corner — the same space Fyne delivers
+// every pointer event in) into the underlying image's own local
+// coordinate space, and returns the image's own natural size alongside it
+// — the correct pair to feed widgetPointToPDF/widgetRectToQuad, INSTEAD
+// of pos/d.Size() directly.
+//
+// Necessary because d's own Size() and the image's own displayed size can
+// genuinely differ: image.FillMode is ImageFillOriginal, which — per its
+// own doc comment, behaving like ImageFillContain — centers the image
+// within whatever bounds it's given, with transparent padding on the
+// sides that overflow, whenever those bounds exceed the image's own
+// natural size (tracked via SetMinSize, by applyFitWidth/applyFitPage).
+// And a container.Scroll's own renderer (internal/widget/scroller.go)
+// unconditionally resizes its Content to
+// internal.MaxSizes(content.MinSize(), viewportSize) — the LARGER of the
+// two in each dimension — so d ends up padded (and its own Size() bigger
+// than the image's natural size) any time the scroll viewport exceeds the
+// current Fit-Width/Fit-Page image size in either dimension, which is
+// routine (e.g. any page whose fitted height is less than the window's
+// own height). Confirmed via real hands-on testing, not just reading
+// Fyne's source: clicking exactly on a thin Line annotation's own visible
+// pixels missed it entirely, only landing correctly well off to the side
+// — exactly what an uncorrected centering offset produces, worse for
+// anything not near the image's own center.
+func (d *highlightDrawer) imageLocalPos(pos fyne.Position) (fyne.Position, fyne.Size) {
+	imgSize := d.image.MinSize()
+	widgetSize := d.Size()
+	padX := (widgetSize.Width - imgSize.Width) / 2
+	padY := (widgetSize.Height - imgSize.Height) / 2
+	return fyne.NewPos(pos.X-padX, pos.Y-padY), imgSize
 }
 
 // Tapped fires OnTapped — see its own doc comment for why this never
 // conflicts with a drag gesture.
 func (d *highlightDrawer) Tapped(e *fyne.PointEvent) {
 	if d.OnTapped != nil {
-		d.OnTapped(e.Position, d.Size())
+		pos, size := d.imageLocalPos(e.Position)
+		d.OnTapped(pos, size)
 	}
 }
 
@@ -141,7 +224,8 @@ func (d *highlightDrawer) Tapped(e *fyne.PointEvent) {
 // so a right-click (or long-press) reaches this widget at all.
 func (d *highlightDrawer) TappedSecondary(e *fyne.PointEvent) {
 	if d.OnTappedSecondary != nil {
-		d.OnTappedSecondary(e.Position, d.Size(), e.AbsolutePosition)
+		pos, size := d.imageLocalPos(e.Position)
+		d.OnTappedSecondary(pos, size, e.AbsolutePosition)
 	}
 }
 

@@ -3,6 +3,7 @@ package pdf
 import (
 	"image"
 	"image/color"
+	"path/filepath"
 	"testing"
 
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
@@ -197,10 +198,65 @@ func TestHasPaintedColor_IncludesLineAlongsideQuadKinds(t *testing.T) {
 	for kind, want := range map[string]bool{
 		"Highlight": true, "Underline": true, "Strikeout": true, "Squiggly": true,
 		"Line": true, "Note": false,
+		// Square/Circle/Polygon/FreeText: this app's own authored shape
+		// kinds (see AddRectShape/AddPolygonShape/AddTextShape) — real
+		// user feedback found "Change Color" refused to work on a
+		// freshly-drawn shape at all, and it turned out to just be this
+		// gate never having been extended past the original markup/Line
+		// kinds. Stamp/PolyLine/Ink/Caret stay false: this app never
+		// authors those, and has no per-kind geometry to hand-paint a new
+		// color with even if it tried.
+		"Square": true, "Circle": true, "Polygon": true, "FreeText": true,
+		"Stamp": false, "PolyLine": false, "Ink": false, "Caret": false,
 	} {
 		if got := hasPaintedColor(kind); got != want {
 			t.Errorf("hasPaintedColor(%q) = %v, want %v", kind, got, want)
 		}
+	}
+}
+
+// TestPaintHighlights_PolygonWithoutVerticesFallsBackToRectOutline is the
+// real regression guard for a bug that would otherwise ship alongside
+// enabling "Change Color" for Polygon: an already-saved Polygon this app
+// didn't draw itself (e.g. a real Preview-authored one, loaded back with
+// Rect populated but Vertices empty — see Highlight.Vertices' own doc
+// comment) must still paint SOMETHING when its color is changed, not
+// nothing at all — recoloring it routes through the exact same
+// needsHandPaint path a freshly-drawn one does, and drawPolygonOutline
+// itself correctly paints nothing for an empty vertex list, so
+// paintHighlights' own Polygon case must fall back to a plain Rect
+// outline rather than calling drawPolygonOutline blindly.
+func TestPaintHighlights_PolygonWithoutVerticesFallsBackToRectOutline(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.pdf")
+	writeMinimalPDF(t, path)
+	doc, err := Prepare(path)
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	defer doc.Close()
+
+	h := &Highlight{
+		Page: 1, Kind: "Polygon", ObjNr: 42, // already-saved -- not ObjNr == 0
+		Rect: [4]float64{20, 20, 80, 80}, Color: [3]float64{0, 1, 0},
+		origColor: [3]float64{1, 0, 0}, // diverged from origColor -> colorChanged -> needsHandPaint
+	}
+	doc.Highlights = []*Highlight{h}
+
+	img := image.NewRGBA(image.Rect(0, 0, 200, 200))
+	doc.paintHighlights(img, 1, 72) // scale = 1.0 at 72 DPI
+
+	painted := false
+	b := img.Bounds()
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			if img.RGBAAt(x, y).A > 0 {
+				painted = true
+			}
+		}
+	}
+	if !painted {
+		t.Errorf("expected a Rect-outline fallback painted for a Polygon with no Vertices, found nothing")
 	}
 }
 
@@ -371,5 +427,79 @@ func TestDrawLineAnnotation_MalformedPointsPaintsNothing(t *testing.T) {
 	r := drawLineAnnotation(img, []float64{1, 2, 3}, [2]string{"None", "None"}, 1, col, 20, 1)
 	if !r.Empty() {
 		t.Errorf("expected an empty rect for malformed points, got %v", r)
+	}
+}
+
+// TestDrawEllipseOutline_PaintsRingNotFill confirms a Circle's hand-paint
+// preview (paintHighlights' own needsHandPaint gate, for a freshly-drawn,
+// not-yet-saved Circle) actually draws a ring — painted near the
+// bounding box's own edges, all four compass points, but NOT at the
+// center (a stroke, matching Preview's own default appearance for a
+// freshly-drawn Circle/Square shape, not a filled disc).
+func TestDrawEllipseOutline_PaintsRingNotFill(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 100, 100))
+	r := image.Rect(10, 10, 90, 90) // center (50,50), rx=ry=40
+	col := color.NRGBA{R: 0, G: 255, B: 0, A: 255}
+
+	drawEllipseOutline(img, r, col, 3)
+
+	painted := func(x, y int) bool { return img.RGBAAt(x, y).A > 0 }
+	for _, pt := range [][2]int{{50, 10}, {50, 89}, {10, 50}, {89, 50}} {
+		if !painted(pt[0], pt[1]) {
+			t.Errorf("expected the ring painted at compass point %v, found nothing", pt)
+		}
+	}
+	if painted(50, 50) {
+		t.Errorf("expected the center NOT painted (a stroke, not a fill), found paint there")
+	}
+}
+
+// TestDrawEllipseOutline_DegenerateRectPaintsNothing guards the same
+// "nothing to draw" case lineBoundsPixelRect's own fix had to handle for
+// a Line — a zero-width or zero-height bounding box has no ellipse to
+// stroke at all, so this must return cleanly rather than divide by zero
+// or loop forever.
+func TestDrawEllipseOutline_DegenerateRectPaintsNothing(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 20, 20))
+	col := color.NRGBA{R: 255, A: 255}
+	drawEllipseOutline(img, image.Rect(5, 5, 5, 15), col, 2) // zero width
+	for y := 0; y < 20; y++ {
+		for x := 0; x < 20; x++ {
+			if img.RGBAAt(x, y).A > 0 {
+				t.Fatalf("expected nothing painted for a zero-width rect, found paint at (%d,%d)", x, y)
+			}
+		}
+	}
+}
+
+// TestDrawPolygonOutline_ClosesTheLoop confirms a Star/Hexagon's own
+// hand-paint preview strokes every edge INCLUDING the one connecting the
+// last vertex back to the first — the "closes back to the first vertex"
+// contract Highlight.Vertices' own doc comment promises. A square-ish
+// 4-vertex polygon's closing edge (from (90,10) back to (10,10)) is
+// checked directly at its own midpoint, a point no OTHER edge could
+// plausibly paint.
+func TestDrawPolygonOutline_ClosesTheLoop(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 100, 100))
+	col := color.NRGBA{R: 0, G: 0, B: 255, A: 255}
+	vertices := [][2]float64{{10, 10}, {10, 90}, {90, 90}, {90, 10}}
+
+	drawPolygonOutline(img, vertices, col, 3)
+
+	if img.RGBAAt(50, 10).A == 0 {
+		t.Errorf("expected the closing edge (90,10)->(10,10) painted at its midpoint (50,10), found nothing")
+	}
+}
+
+func TestDrawPolygonOutline_FewerThanTwoVerticesPaintsNothing(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 20, 20))
+	col := color.NRGBA{R: 255, A: 255}
+	drawPolygonOutline(img, [][2]float64{{5, 5}}, col, 2)
+	for y := 0; y < 20; y++ {
+		for x := 0; x < 20; x++ {
+			if img.RGBAAt(x, y).A > 0 {
+				t.Fatalf("expected nothing painted for a single-vertex polygon, found paint at (%d,%d)", x, y)
+			}
+		}
 	}
 }

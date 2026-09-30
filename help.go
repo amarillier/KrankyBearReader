@@ -43,7 +43,8 @@ A tabbed, multi-format document reader. Open a file via File → Open..., drag
 one (or several at once) onto the window, pass paths on the command line, or
 pick one from Recent Files — each opens in its own tab, with the right viewer
 chosen automatically. Try Help → Sample Files for a quick tour of every
-supported format.
+supported format except PDF (you almost certainly already have a real PDF
+on hand to try that viewer with instead).
 
 SUPPORTED FORMATS:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -76,12 +77,26 @@ PDF VIEWING:
   standard. Saving with zero entries removes the outline entirely. Edit
   Title renames a selected TOC entry or Bookmark in place (its page/position
   are left as-is); to change where one points, delete and re-add it instead.
-• Highlights and Notes: lists highlights, underlines, strikeouts, and notes
-  already in the PDF (e.g. made in Preview or Acrobat) — tap to jump to that
-  page. Highlights also paint directly onto the page, tinted with their own
-  color from the PDF when it specifies one. Underlines, strikeouts, and
-  squiggly marks are listed but not yet painted. Read-only: this app doesn't
-  add or edit any of these annotations, only shows what's already there.
+• Highlights and Notes: lists every annotation already in the PDF (e.g.
+  made in Preview or Acrobat) — tap to jump to that page. Every kind paints
+  directly onto the page, in its own color where it has one, whatever its
+  kind (Highlight, Underline, Strikeout, Squiggly, Line/arrow, Square,
+  Circle, Polygon, FreeText, Stamp, Ink, and more).
+• Draw: pick a kind from the toolbar's "Draw: ..." dropdown (Highlight,
+  Square, Circle, Line, Star, Hexagon, Text, Speech Bubble), then drag on
+  the page to add it. Text and Speech Bubble prompt for the caption right
+  after the drag; Line draws as an arrow from where you start dragging to
+  where you release.
+• Select and edit: click any highlight/shape directly on the page, or pick
+  it from the panel's own list, to select it — shown with a blue outline.
+  "Change Color" recolors it (for the kinds this app can draw itself);
+  Delete/Backspace (or the panel's "Delete Selected" button) removes it;
+  Escape, or clicking empty page space, deselects without changing
+  anything. Moving or resizing an existing shape isn't supported yet.
+• Save to PDF: writes your changes back — overwrite the original, or "Save
+  as a new file..." (the tab then follows the new file). Real edits to the
+  PDF's own annotations, so other readers (Preview, Acrobat, ...) see them
+  too.
 
 FIND:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -92,8 +107,13 @@ expressions via the Regex checkbox.
   jump to each match in turn (Markdown's jump is an approximate scroll
   position, not exact — the underlying widget has no cursor concept the way
   the plain-text view does).
-• PDF search is page-level: it jumps to the next/previous page containing a
-  match, not to the exact spot on the page.
+• PDF search reports a real "Match X of Y (found on N pages)" count and
+  steps through every individual occurrence, including several on the same
+  page, drawing an approximate highlight box directly on the page around
+  the current match. That box is estimated from the page's own text
+  layout, not an exact character lookup, so it can occasionally land a
+  little off on an unusual line — the status text is always accurate even
+  when the box isn't pixel-perfect.
 
 WINDOW MANAGEMENT:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -118,6 +138,10 @@ KEYBOARD SHORTCUTS:
 • Alt+H - Hide all windows
 • Space, Page Down/Up, Home, End - Page navigation, while a PDF tab is the
   selected one (these don't fire in other tabs)
+• Delete/Backspace - Delete the currently selected PDF highlight/shape
+  (PDF tab only; does nothing with no selection)
+• Escape - Deselect the currently selected PDF highlight/shape (PDF tab
+  only)
 • Standard system shortcuts also apply (Cmd/Ctrl+Q to quit, etc.)
 
 KNOWN LIMITATIONS:
@@ -125,12 +149,17 @@ KNOWN LIMITATIONS:
 • PDF region bookmarks (an exact scroll position, not just a page) aren't
   preserved on Save to PDF today — they're saved as page-level bookmarks;
   the position is remembered only for the current session.
-• Highlights/notes are read-only: viewable, listed, and (Highlights only)
-  painted onto the page, but never added or edited from within this app.
-  Underlines, strikeouts, and squiggly marks are listed but not yet painted.
+• Existing highlights/shapes can be selected, deleted, and (for the kinds
+  this app can draw) recolored, but not yet moved, resized, or otherwise
+  edited directly on the page.
+• Stamp, Ink, PolyLine, and Caret annotations can be viewed, selected, and
+  deleted, but not drawn by this app — anything already saved in the file
+  still renders and behaves correctly either way.
 • Text/Markdown find moves to each match but can't paint a visible
   highlight box around it — a limitation of the underlying text widgets,
-  not a missing feature.
+  not a missing feature. PDF find's own highlight box is an estimate, not
+  an exact character-position lookup, so it can occasionally miss on an
+  unusual line.
 
 MORE INFORMATION:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -2,6 +2,7 @@ package pdf
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
 
@@ -12,24 +13,157 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-// compileTextMatcher is a small local copy of internal/viewer's
+// compileTextCounter is a small local relative of internal/viewer's
 // compileMatcher — this package can't import that one (internal/viewer
-// already imports internal/viewer/pdf, so the reverse would cycle), and the
-// logic is small enough that duplicating it here is simpler than a new
-// shared package just for this.
-func compileTextMatcher(query string, useRegex bool) (func(s string) bool, error) {
+// already imports internal/viewer/pdf, so the reverse would cycle) — but
+// counts every non-overlapping occurrence in s rather than just reporting
+// whether one exists, the data buildFindBar's own document-wide search
+// needs (see findState). strings.Count's own non-overlapping convention
+// (matching how a browser's or Preview's own find already counts
+// "aaa".Count("aa") as 1, not 2) is kept for the plain-text path for the
+// same reason; regexp.FindAllStringIndex already returns non-overlapping
+// matches for the regex path.
+func compileTextCounter(query string, useRegex bool) (func(s string) int, error) {
 	if query == "" {
-		return func(string) bool { return false }, nil
+		return func(string) int { return 0 }, nil
 	}
 	if useRegex {
 		re, err := regexp.Compile(query)
 		if err != nil {
 			return nil, err
 		}
-		return re.MatchString, nil
+		return func(s string) int { return len(re.FindAllStringIndex(s, -1)) }, nil
 	}
 	lower := strings.ToLower(query)
-	return func(s string) bool { return strings.Contains(strings.ToLower(s), lower) }, nil
+	return func(s string) int { return strings.Count(strings.ToLower(s), lower) }, nil
+}
+
+// findState is one completed document-wide search: matchPages[i] is the
+// 1-based page of the i-th match overall, in document order (a page with
+// k occurrences appears k times in a row) — simple enough to index
+// directly for next/prev stepping and to report "page P" for the current
+// match, without needing per-match character positions (blocked by
+// go-fitz having no such API at all — see ReleaseNotes' Future ideas for
+// the phase this unblocks: an actual on-page highlight box).
+type findState struct {
+	query      string
+	useRegex   bool
+	matchPages []int
+	// pagesWithMatch is len(unique matchPages) -- reported alongside
+	// "Match X of Y" the same way Preview reports "Found on N pages"
+	// alongside its own match count.
+	pagesWithMatch int
+	currentIndex   int // -1 until the first next/prev step after a (re)build
+	// lastPage is the page the most recent step() call jumped to — see
+	// step's own doc comment for why this, not just currentIndex < 0, is
+	// what decides whether to re-anchor near the caller's current page.
+	lastPage int
+}
+
+// buildFindState scans every page's already-extracted text (Document.PageText)
+// once, counting every occurrence via counter — the actual fix for the
+// find bar only ever jumping to the nearest matching PAGE, one at a time,
+// with no idea how many matches existed anywhere else in the document.
+func buildFindState(doc *Document, query string, useRegex bool) (*findState, error) {
+	counter, err := compileTextCounter(query, useRegex)
+	if err != nil {
+		return nil, err
+	}
+	s := &findState{query: query, useRegex: useRegex, currentIndex: -1}
+	for page := 1; page <= doc.PageCount(); page++ {
+		text, err := doc.PageText(page)
+		if err != nil {
+			continue
+		}
+		c := counter(text)
+		if c == 0 {
+			continue
+		}
+		s.pagesWithMatch++
+		for i := 0; i < c; i++ {
+			s.matchPages = append(s.matchPages, page)
+		}
+	}
+	return s, nil
+}
+
+// stale reports whether query/useRegex have changed since s was built —
+// buildFindBar rebuilds from scratch when true, rather than stepping a
+// search that no longer matches what's in the entry/regex checkbox.
+func (s *findState) stale(query string, useRegex bool) bool {
+	return s == nil || s.query != query || s.useRegex != useRegex
+}
+
+// step advances to the next (dir=1) or previous (dir=-1) match from
+// fromPage, wrapping around the document, and returns the 1-based page to
+// jump to.
+//
+// Re-anchors — starts fresh from the nearest match at-or-after fromPage
+// (dir=1) or at-or-before it (dir=-1), the same "search from where you
+// are" behavior the old page-only find had, rather than blindly moving
+// the flat index by dir — whenever fromPage doesn't match lastPage, the
+// page the PREVIOUS step call landed on. Not just on the very first step
+// after a (re)build (checking currentIndex < 0 alone, an earlier version
+// of this method's own behavior): found via real hands-on testing that
+// searching the same query again after manually navigating elsewhere
+// (e.g. jumping to page 1, or clicking a bookmark) kept advancing the OLD
+// sequence from wherever it left off, when the user's own expectation —
+// reasonably — was for it to notice they'd moved and start again from
+// where they now are. Only actually re-anchors when the caller's current
+// page has genuinely diverged from this state's own idea of "where the
+// last match left you"; repeatedly clicking next/prev without navigating
+// elsewhere in between keeps fromPage == lastPage every time, so normal
+// sequential stepping through every occurrence (including several on the
+// same page) is unaffected.
+func (s *findState) step(fromPage, dir int) int {
+	n := len(s.matchPages)
+	if s.currentIndex < 0 || fromPage != s.lastPage {
+		idx := -1
+		if dir > 0 {
+			for i, p := range s.matchPages {
+				if p >= fromPage {
+					idx = i
+					break
+				}
+			}
+		} else {
+			for i := n - 1; i >= 0; i-- {
+				if s.matchPages[i] <= fromPage {
+					idx = i
+					break
+				}
+			}
+		}
+		if idx < 0 {
+			idx = 0
+			if dir < 0 {
+				idx = n - 1
+			}
+		}
+		s.currentIndex = idx
+	} else {
+		s.currentIndex = ((s.currentIndex+dir)%n + n) % n
+	}
+	s.lastPage = s.matchPages[s.currentIndex]
+	return s.lastPage
+}
+
+// occurrenceIndexOnPage reports how many earlier occurrences of the
+// current match's own page came before it in matchPages — i.e. the
+// current match is the (return value)-th occurrence ON THAT PAGE
+// specifically, 0-based. buildFindBar's own on-page highlight box needs
+// this: Document.SearchMatchRect re-searches just one page's own text, so
+// it needs to know which occurrence within that page to land on, not the
+// flat document-wide index currentIndex already is.
+func (s *findState) occurrenceIndexOnPage() int {
+	page := s.matchPages[s.currentIndex]
+	count := 0
+	for i := 0; i < s.currentIndex; i++ {
+		if s.matchPages[i] == page {
+			count++
+		}
+	}
+	return count
 }
 
 // continuousBuffer is how many extra rows above/below the viewport stay
@@ -71,6 +205,7 @@ func (v *view) jumpToPageAndPosition(page int, frac float32) {
 	if v.continuous {
 		v.imageScroll.Offset = fyne.NewPos(0, float32(page-1)*v.contRowH+frac*v.contRowH)
 		v.imageScroll.Refresh()
+		v.win.Canvas().Refresh(v.imageScroll)
 		v.lazyRenderVisible()
 		return
 	}
@@ -82,6 +217,7 @@ func (v *view) jumpToPageAndPosition(page int, frac float32) {
 	if frac > 0 {
 		v.imageScroll.Offset = fyne.NewPos(0, frac*v.scrollableHeight())
 		v.imageScroll.Refresh()
+		v.win.Canvas().Refresh(v.imageScroll)
 	}
 }
 
@@ -195,38 +331,186 @@ func (v *view) refreshAllPages() {
 	}
 }
 
-// setHighlightMode toggles Draw Highlight mode: while on, dragging on the
-// page creates a new highlight (see highlightDrawer.Dragged/DragEnd);
-// while off, dragging on the page does nothing, same as before this
-// feature existed. Applies to every page's drawer at once, single-page and
-// continuous alike, so switching modes mid-scroll doesn't leave some pages
-// still draggable.
-func (v *view) setHighlightMode(on bool) {
-	v.highlightMode = on
+// setDrawKind sets which shape kind (if any) dragging on the page creates
+// — "" turns drawing off entirely, dragging does nothing (same as before
+// this feature existed, and the same as clicking anywhere while it's on
+// still does for click-to-select — see highlightDrawer.Dragged/DragEnd).
+// Applies to every page's drawer at once, single-page and continuous
+// alike, so switching modes mid-scroll doesn't leave some pages still
+// draggable while others aren't.
+func (v *view) setDrawKind(kind string) {
+	v.drawKind = kind
+	enabled := kind != ""
 	if v.currentDrawer != nil {
-		v.currentDrawer.Enabled = on
+		v.currentDrawer.Enabled = enabled
 	}
 	for _, d := range v.pageDrawers {
 		if d != nil {
-			d.Enabled = on
+			d.Enabled = enabled
 		}
 	}
 }
 
+// defaultArrowEndStyle is what a freshly-drawn "Line" shape gets: no
+// arrowhead at the drag's start, a closed arrowhead at its end — matching
+// the natural "point at something" gesture (drag FROM the thing you're
+// pointing away from TO the thing you're pointing at). An array literal
+// can't be a Go const, hence var.
+var defaultArrowEndStyle = [2]string{"None", "ClosedArrow"}
+
 // handleHighlightDrawn is every highlightDrawer.OnDrawn's target, for both
-// single-page and continuous-scroll page widgets: converts the drawn
-// rectangle from widget-local points into a PDF quad (widgetRectToQuad)
-// and adds it as a new in-memory highlight, then makes it visible
-// immediately — in the Highlights panel's list and painted on the page.
-func (v *view) handleHighlightDrawn(page int, topLeft, bottomRight fyne.Position, widgetSize fyne.Size) {
+// single-page and continuous-scroll page widgets: converts the drag's
+// start/end points into the right geometry for v.drawKind and adds it as
+// a new in-memory highlight, then makes it visible immediately — in the
+// Highlights panel's list and painted on the page (see paintHighlights'
+// own needsHandPaint gate, which is what makes a not-yet-saved shape of
+// any of these kinds show up at all before Save to PDF runs).
+//
+// start/end are the drag's own raw endpoints, not normalized into
+// top-left/bottom-right — Line needs that (an arrow points from start
+// toward end, not toward whichever corner happens to be lower-right);
+// Square/Circle/Highlight don't care about direction, so they derive
+// their own min/max bounds from the same two points.
+func (v *view) handleHighlightDrawn(page int, start, end fyne.Position, widgetSize fyne.Size) {
 	pageW, pageH, err := v.doc.PageBoundsPt(page)
 	if err != nil {
 		return
 	}
-	quad := widgetRectToQuad(topLeft, bottomRight, widgetSize, pageW, pageH)
-	v.doc.AddHighlight(page, [][8]float64{quad}, v.highlightColor, "")
+	switch v.drawKind {
+	case "Line":
+		x1, y1 := widgetPointToPDF(start, widgetSize, pageW, pageH)
+		x2, y2 := widgetPointToPDF(end, widgetSize, pageW, pageH)
+		v.doc.AddLineShape(page, []float64{x1, y1, x2, y2}, defaultArrowEndStyle, v.highlightColor)
+	case "Square", "Circle":
+		x1, y1 := widgetPointToPDF(start, widgetSize, pageW, pageH)
+		x2, y2 := widgetPointToPDF(end, widgetSize, pageW, pageH)
+		rect := [4]float64{min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)}
+		v.doc.AddRectShape(page, v.drawKind, rect, v.highlightColor)
+	case "Star", "Hexagon":
+		x1, y1 := widgetPointToPDF(start, widgetSize, pageW, pageH)
+		x2, y2 := widgetPointToPDF(end, widgetSize, pageW, pageH)
+		cx, cy := (x1+x2)/2, (y1+y2)/2
+		rx, ry := math.Abs(x2-x1)/2, math.Abs(y2-y1)/2
+		vertices := hexagonVertices(cx, cy, rx, ry)
+		if v.drawKind == "Star" {
+			vertices = starVertices(cx, cy, rx, ry)
+		}
+		v.doc.AddPolygonShape(page, vertices, v.highlightColor)
+	case "Text", "Speech Bubble":
+		// Unlike every other kind, this one needs a caption before
+		// there's anything to add at all — promptForShapeText creates
+		// the shape (and does its own refreshList/repaintPage) only on
+		// confirm, so a cancelled dialog leaves no phantom empty
+		// annotation behind. Must return here, not fall through to the
+		// unconditional refresh/repaint below.
+		x1, y1 := widgetPointToPDF(start, widgetSize, pageW, pageH)
+		x2, y2 := widgetPointToPDF(end, widgetSize, pageW, pageH)
+		rect := [4]float64{min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)}
+		v.promptForShapeText(page, rect, v.drawKind == "Speech Bubble")
+		return
+	default: // "Highlight", and the fallback for any unrecognized drawKind
+		quad := widgetRectToQuad(rectTopLeft(start, end), rectBottomRight(start, end), widgetSize, pageW, pageH)
+		v.doc.AddHighlight(page, [][8]float64{quad}, v.highlightColor, "")
+	}
 	v.highlights.refreshList()
 	v.repaintPage(page)
+}
+
+// starVertexCount/starInnerRadiusRatio shape the 5-pointed star every
+// "Draw: Star" drag produces: 10 vertices alternating an outer point and
+// an inner one, closing back to the first — innerRatio 0.4 is a plain
+// aesthetic choice (not a precise mathematical constant) that reads as a
+// recognizable 5-point star at typical drawn sizes, not a geometric
+// requirement.
+const (
+	starPointCount       = 5
+	starInnerRadiusRatio = 0.4
+	hexagonVertexCount   = 6
+)
+
+// hexagonVertices/starVertices generate a regular hexagon/5-pointed star
+// inscribed in the ellipse centered at (cx, cy) with radii rx, ry (PDF
+// user-space points — same non-uniform-stretch allowance a drag-to-fit
+// rectangle already gives Square/Circle, rather than forcing a perfect
+// regular polygon regardless of how the user actually dragged). Both
+// start at angle -90° (straight up) so the shape's own "top" lands where
+// a user dragging top-to-bottom would expect it, then walk evenly-spaced
+// angles around the ellipse — Polygon's own /Vertices has no notion of
+// "which vertex is the top," so this is purely about matching visual
+// expectation, not a PDF requirement. There's no dedicated PDF annotation
+// subtype for either shape; both are authored as a generic Polygon (see
+// AddPolygonShape) — MuPDF has no idea, or need to know, that this
+// Polygon started life as a hexagon rather than any other six-vertex
+// shape someone else might have drawn.
+func hexagonVertices(cx, cy, rx, ry float64) [][2]float64 {
+	v := make([][2]float64, hexagonVertexCount)
+	for i := range v {
+		theta := -math.Pi/2 + float64(i)*2*math.Pi/float64(hexagonVertexCount)
+		v[i] = [2]float64{cx + rx*math.Cos(theta), cy + ry*math.Sin(theta)}
+	}
+	return v
+}
+
+func starVertices(cx, cy, rx, ry float64) [][2]float64 {
+	n := starPointCount * 2
+	v := make([][2]float64, n)
+	for i := range v {
+		theta := -math.Pi/2 + float64(i)*math.Pi/float64(starPointCount)
+		r := 1.0
+		if i%2 == 1 {
+			r = starInnerRadiusRatio
+		}
+		v[i] = [2]float64{cx + rx*r*math.Cos(theta), cy + ry*r*math.Sin(theta)}
+	}
+	return v
+}
+
+// promptForShapeText shows a text-entry dialog for a freshly-drawn Text
+// or Speech Bubble shape's caption, mirroring bookmarkPanel's own "Add
+// Bookmark" title-entry dialog (dialog.NewCustomConfirm + focus the
+// entry). Creates the shape only on confirm with non-empty text —
+// cancelling, or confirming blank, leaves no phantom empty annotation
+// behind, matching AddHighlight-family methods' own "nothing reaches
+// d.Highlights until there's something real to add" convention.
+func (v *view) promptForShapeText(page int, rect [4]float64, speechBubble bool) {
+	entry := widget.NewMultiLineEntry()
+	entry.SetPlaceHolder("Text...")
+	title := "Add Text Block"
+	if speechBubble {
+		title = "Add Speech Bubble"
+	}
+	d := dialog.NewCustomConfirm(title, "Add", "Cancel", entry, func(ok bool) {
+		if !ok || entry.Text == "" {
+			return
+		}
+		var tip *[2]float64
+		if speechBubble {
+			t := calloutTipFor(rect)
+			tip = &t
+		}
+		v.doc.AddTextShape(page, rect, tip, entry.Text, v.highlightColor)
+		v.highlights.refreshList()
+		v.repaintPage(page)
+	}, v.win)
+	d.Resize(fyne.NewSize(360, 220))
+	d.Show()
+	v.win.Canvas().Focus(entry)
+}
+
+// calloutTipFor picks a speech bubble's callout tip (the tail's far end)
+// a fixed offset below-left of its box, proportional to the box's own
+// (smaller) dimension so the tail looks reasonable whether the box is
+// small or large. Simple, predictable placement for a first version —
+// letting the user aim the tail precisely is a shape-EDIT feature (see
+// ReleaseNotes' Future ideas), not something initial drawing needs to
+// solve.
+func calloutTipFor(rect [4]float64) [2]float64 {
+	w, h := rect[2]-rect[0], rect[3]-rect[1]
+	offset := math.Min(w, h) * 0.4
+	if offset <= 0 {
+		offset = 10
+	}
+	return [2]float64{rect[0] - offset, rect[1] - offset}
 }
 
 // handleHighlightTapped is every highlightDrawer.OnTapped's target: hit-
@@ -235,7 +519,11 @@ func (v *view) handleHighlightDrawn(page int, topLeft, bottomRight fyne.Position
 // direction of selecting a list row and seeing it outlined on the page.
 // Reuses the list's own Select (which fires OnSelected, see
 // highlightsPanel.newHighlightsPanel) rather than duplicating its
-// jump/outline/repaint logic here.
+// jump/outline/repaint logic here. A tap that hits nothing deselects
+// instead of leaving whatever was selected lingering — clicking empty
+// page space is a deliberate "I don't mean to have anything selected"
+// gesture, the same as it would be in most editors, and matters more now
+// that a bare Delete/Backspace keypress acts on the current selection.
 func (v *view) handleHighlightTapped(page int, pos fyne.Position, widgetSize fyne.Size) {
 	pageW, pageH, err := v.doc.PageBoundsPt(page)
 	if err != nil {
@@ -244,6 +532,7 @@ func (v *view) handleHighlightTapped(page int, pos fyne.Position, widgetSize fyn
 	x, y := widgetPointToPDF(pos, widgetSize, pageW, pageH)
 	h := v.doc.HighlightAt(page, x, y)
 	if h == nil {
+		v.highlights.deselect()
 		return
 	}
 	for i, candidate := range v.doc.Highlights {
@@ -431,9 +720,9 @@ func (v *view) buildContinuousPages() {
 
 		page := i + 1
 		drawer := newHighlightDrawer(img)
-		drawer.Enabled = v.highlightMode
-		drawer.OnDrawn = func(tl, br fyne.Position, size fyne.Size) {
-			v.handleHighlightDrawn(page, tl, br, size)
+		drawer.Enabled = v.drawKind != ""
+		drawer.OnDrawn = func(start, end fyne.Position, size fyne.Size) {
+			v.handleHighlightDrawn(page, start, end, size)
 		}
 		drawer.OnTapped = func(pos fyne.Position, size fyne.Size) {
 			v.handleHighlightTapped(page, pos, size)
@@ -606,5 +895,13 @@ func (v *view) typedKey(ev *fyne.KeyEvent) {
 		if v.highlights.selected != nil {
 			v.highlights.deleteSelected()
 		}
+	case fyne.KeyEscape:
+		// Deselects whatever's currently selected — a deliberate,
+		// explicit way to back out of a selection before it causes an
+		// accidental delete (or, once shape move/edit exists, an
+		// accidental move/edit), on top of delete's own confirm dialog.
+		// A no-op with nothing selected, same as deleteSelected's own
+		// guard above.
+		v.highlights.deselect()
 	}
 }

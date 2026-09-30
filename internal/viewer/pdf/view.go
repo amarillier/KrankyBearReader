@@ -2,6 +2,7 @@ package pdf
 
 import (
 	"fmt"
+	"strings"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -81,8 +82,8 @@ type view struct {
 	zoomLevel      float64                       // -1 Fit Width, -2 Fit Page, else a literal zoom factor
 	continuous     bool
 	panelMode      PanelMode
-	highlightMode  bool       // Draw Highlight toggle — see setHighlightMode/handleHighlightDrawn
-	highlightColor [3]float64 // color the next drawn highlight uses — see colorSwatchBtn
+	drawKind       string     // "" = off, else "Highlight"/"Square"/"Circle"/"Line" — see setDrawKind/handleHighlightDrawn
+	highlightColor [3]float64 // color the next drawn shape uses — see colorSwatchBtn
 	colorSwatchBtn *colorSwatch
 
 	currentImage  *canvas.Image
@@ -235,8 +236,8 @@ func (v *view) build() fyne.CanvasObject {
 	// was set.
 	v.currentImage = &canvas.Image{FillMode: canvas.ImageFillOriginal}
 	v.currentDrawer = newHighlightDrawer(v.currentImage)
-	v.currentDrawer.OnDrawn = func(tl, br fyne.Position, size fyne.Size) {
-		v.handleHighlightDrawn(v.currentPage, tl, br, size)
+	v.currentDrawer.OnDrawn = func(start, end fyne.Position, size fyne.Size) {
+		v.handleHighlightDrawn(v.currentPage, start, end, size)
 	}
 	v.currentDrawer.OnTapped = func(pos fyne.Position, size fyne.Size) {
 		v.handleHighlightTapped(v.currentPage, pos, size)
@@ -310,13 +311,47 @@ func (v *view) buildToolbar() fyne.CanvasObject {
 		v.setContinuous(on)
 	})
 
-	// Draw Highlight: click-drag a rectangle directly on the page to create
-	// a new highlight (see highlight_draw.go) — go-fitz has no text
-	// bounding-box API for a real text-snapped selection like Preview/
-	// Acrobat's, so this is a free rectangle instead. Off by default so a
-	// plain click-drag (which did nothing before this existed) still does
-	// nothing unless the user deliberately turns this on.
-	highlightCheck := widget.NewCheck("Draw Highlight", v.setHighlightMode)
+	// Draw: click-drag directly on the page to create a new shape of
+	// whichever kind is selected here (see handleHighlightDrawn) — a
+	// dropdown rather than one checkbox per kind, matching the same
+	// "don't reserve space for every option all the time" reasoning as
+	// panelSelect below. Highlight/Square/Circle/Star/Hexagon are a plain
+	// rectangle drag (go-fitz has no text bounding-box API for a real
+	// text-snapped selection like Preview/Acrobat's Highlight tool, so
+	// this is a free rectangle instead; Star/Hexagon generate their own
+	// vertices parametrically from that same rectangle — see
+	// starVertices/hexagonVertices, since PDF has no dedicated subtype
+	// for either, both are authored as a generic Polygon); Line draws an
+	// arrow from the drag's start toward its end (see
+	// defaultArrowEndStyle); Text/Speech Bubble prompt for the caption
+	// text before creating anything (see promptForShapeText). "Off" by
+	// default so a plain click-drag (which did nothing before Draw
+	// Highlight existed) still does nothing unless the user deliberately
+	// picks a shape.
+	//
+	// Every option is prefixed "Draw: " — found via real hands-on testing
+	// that a bare "Off" (this control's own closed-state label, same as
+	// every other option) reads as just an unlabeled toolbar item sitting
+	// next to Continuous Scroll, not obviously a mode selector at all, so
+	// it went unnoticed until the user went looking for it specifically.
+	// Unlike panelSelect below (whose closed-state label alone flips
+	// between two self-describing strings), every option here already
+	// needs its own distinct label, so the fix is prefixing all of them
+	// uniformly rather than special-casing just the closed state.
+	drawOptions := []string{
+		"Draw: Off", "Draw: Highlight", "Draw: Square", "Draw: Circle", "Draw: Line",
+		"Draw: Star", "Draw: Hexagon", "Draw: Text", "Draw: Speech Bubble",
+	}
+	drawSelect := widget.NewSelect(drawOptions, func(s string) {
+		kind := strings.TrimPrefix(s, "Draw: ")
+		if kind == "Off" {
+			v.setDrawKind("")
+		} else {
+			v.setDrawKind(kind)
+		}
+	})
+	drawSelect.Selected = "Draw: Off"
+	drawSelect.Refresh()
 
 	// The swatch shows the color the next drawn highlight will use; tapping
 	// it opens Fyne's own color picker (Advanced mode — full RGB, not just
@@ -361,46 +396,72 @@ func (v *view) buildToolbar() fyne.CanvasObject {
 	v.panelSelectRef = panelSelect
 
 	nav := container.NewHBox(panelSelect, firstBtn, prevBtn, v.pageEntry, v.totalLabel, nextBtn, lastBtn)
-	right := container.NewHBox(v.zoomSelect, continuousCheck, highlightCheck, v.colorSwatchBtn)
+	right := container.NewHBox(v.zoomSelect, continuousCheck, drawSelect, v.colorSwatchBtn)
 	return container.NewBorder(nil, nil, nav, right)
 }
 
 // buildFindBar is a small local find bar (this package can't reuse
 // internal/viewer's shared one — that package already imports this one, so
-// the reverse would be an import cycle). Search is page-level: go-fitz's
-// Text() has no character-position API, so find-next/prev jumps to the
-// nearest page (forward/backward from the current one, wrapping around)
-// whose extracted text matches, not to an exact position within the page.
+// the reverse would be an import cycle). Document-wide: scans every page's
+// already-extracted text once per query (findState), reporting a real
+// match count and "found on N pages" (like Preview), and next/prev steps
+// through every individual occurrence — including several on the same
+// page — not just the nearest matching page. Also draws an approximate
+// on-page highlight box for the current match (Document.SearchMatchRect,
+// via MuPDF's HTML export line positions — see CLAUDE.md for why this is
+// an estimate, not a pixel-perfect box like Preview's, and why that's an
+// accepted tradeoff): when SearchMatchRect can't locate it (e.g. a match
+// spanning a line-wrap boundary the HTML export can't see), the status
+// label stays the source of truth for "which match", same as before this
+// existed.
 func (v *view) buildFindBar() fyne.CanvasObject {
 	entry := widget.NewEntry()
-	entry.SetPlaceHolder("Find in document (page-level)...")
+	entry.SetPlaceHolder("Find in document...")
 	regexCheck := widget.NewCheck("Regex", nil)
 	status := widget.NewLabel("")
+
+	var state *findState
 
 	find := func(dir int) {
 		query := entry.Text
 		if query == "" {
+			status.SetText("")
+			state = nil
+			v.doc.ClearSearchHighlight()
+			v.repaintPage(v.currentPage)
 			return
 		}
-		matches, err := compileTextMatcher(query, regexCheck.Checked)
-		if err != nil {
-			status.SetText(err.Error())
-			return
-		}
-		n := v.doc.PageCount()
-		for i := 1; i <= n; i++ {
-			page := ((v.currentPage-1+dir*i)%n+n)%n + 1
-			text, err := v.doc.PageText(page)
+		if state.stale(query, regexCheck.Checked) {
+			s, err := buildFindState(v.doc, query, regexCheck.Checked)
 			if err != nil {
-				continue
-			}
-			if matches(text) {
-				v.jumpToPage(page)
-				status.SetText(fmt.Sprintf("found on page %d", page))
+				status.SetText(err.Error())
+				state = nil
+				v.doc.ClearSearchHighlight()
+				v.repaintPage(v.currentPage)
 				return
 			}
+			state = s
 		}
-		status.SetText("no matches")
+		if len(state.matchPages) == 0 {
+			status.SetText("No matches")
+			v.doc.ClearSearchHighlight()
+			v.repaintPage(v.currentPage)
+			return
+		}
+		page := state.step(v.currentPage, dir)
+		if rect, ok := v.doc.SearchMatchRect(page, query, regexCheck.Checked, state.occurrenceIndexOnPage()); ok {
+			v.doc.SetSearchHighlight(page, rect)
+		} else {
+			v.doc.ClearSearchHighlight()
+		}
+		v.jumpToPage(page)
+		v.repaintPage(page)
+		pageWord := "pages"
+		if state.pagesWithMatch == 1 {
+			pageWord = "page"
+		}
+		status.SetText(fmt.Sprintf("Match %d of %d (found on %d %s)",
+			state.currentIndex+1, len(state.matchPages), state.pagesWithMatch, pageWord))
 	}
 
 	entry.OnSubmitted = func(string) { find(1) }

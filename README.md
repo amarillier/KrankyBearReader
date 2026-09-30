@@ -25,15 +25,29 @@ bug fixing and performance work.
     or Fit Width/Page), a Table of Contents panel, Bookmarks you can add,
     rename, and save back into the PDF's standard outline (readable by other
     PDF apps too, and reachable straight from the File menu/tray, not just
-    the panel), and a Highlights and Notes panel listing annotations already
-    in the file (e.g. from Preview or Acrobat) — existing highlights are
-    also painted directly onto the page, in their own color.
+    the panel), and a Highlights and Notes panel showing every annotation
+    already in the file (e.g. from Preview or Acrobat) — painted directly
+    onto the page in its own color, whatever its kind. Draw new
+    Highlight/Square/Circle/Line (arrow)/Star/Hexagon/Text block/Speech
+    Bubble annotations directly on the page (a toolbar dropdown picks the
+    kind, then drag); click one on the page (or pick it from the panel) to
+    select it, then Change Color or delete it (Delete/Backspace, or the
+    panel's own button); Escape or clicking empty page space deselects.
+    Save to PDF overwrites the original or saves a new copy (which the tab
+    then follows) — changes made here are real PDF edits other readers see
+    too.
   - **Anything else** falls back to a hex + ASCII dump rather than refusing
     to open it or mishandling binary content as text.
 - **Find, everywhere** — every viewer has a find bar (plain text or regex):
   CSV filters rows, JSON/YAML/TOML/XML filters the tree, Text/Markdown jump
-  between matches, and PDF jumps between pages containing a match.
-- **Sample Files** (Help menu) — a quick tour of every supported format.
+  between matches, and PDF reports a real "Match X of Y (found on N pages)"
+  count and steps through every individual occurrence — including several
+  on the same page — drawing an approximate highlight box around the
+  current match directly on the page (estimated from the page's own text
+  layout, not a pixel-exact lookup, so it can occasionally land a little
+  off on an unusual line).
+- **Sample Files** (Help menu) — a quick tour of every supported format
+  except PDF (most people already have real PDFs on hand to try instead).
 - **Recent Files**, drag-and-drop, and command-line file arguments all open
   through the same path — no format-specific special casing to open a file.
 - **Startup Behavior** (View menu) — optionally reopen the most recent file,
@@ -83,13 +97,17 @@ Platform helpers: `compile-mac.sh`, `compile-win.sh`, `compile-linux.sh`, and
   page itself) aren't preserved when saved back into the PDF — they degrade
   to page-level bookmarks on save; the exact position is remembered only for
   the current session.
-- PDF highlights/notes are read-only: listed and jump-to-page works, but
-  this app doesn't add, edit, or visually paint them onto the rendered page
-  (a limitation of the PDF rendering library in use, not a missing UI
-  toggle).
+- Existing highlights/shapes can be selected, deleted, and (for the kinds
+  this app can itself draw) recolored, but not yet moved, resized, or
+  otherwise edited directly on the page — planned for a future release.
+- A few annotation kinds (Stamp, Ink, PolyLine, Caret) can be viewed,
+  selected, and deleted, but not drawn by this app — anything already
+  saved in a PDF still renders and behaves correctly either way.
 - Find in Text/Markdown views moves to each match but can't paint a visible
   highlight box around it (the underlying text widgets have no public API
-  for that); PDF find is page-level, not exact-position.
+  for that). PDF find's own highlight box is an estimate based on the
+  page's text layout, not an exact character-position lookup, so it can
+  occasionally land a little off on an unusual line.
 
 ## License
 

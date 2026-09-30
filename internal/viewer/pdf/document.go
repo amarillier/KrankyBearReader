@@ -70,6 +70,16 @@ type Document struct {
 
 	textCacheMu sync.Mutex
 	textCache   map[int]string // page -> extracted text, filled lazily by PageText
+
+	lineCacheMu sync.Mutex
+	lineCache   map[int][]textLine // page -> HTML-derived line positions, filled lazily by pageTextLines
+
+	// searchHighlightPage/Rect mark the find bar's current match's
+	// approximate on-page box (PDF-space, origin bottom-left, same
+	// convention as Highlight.Rect) for paintHighlights to draw — see
+	// SetSearchHighlight. Page 0 means "none".
+	searchHighlightPage int
+	searchHighlightRect [4]float64
 }
 
 // Prepare opens path and loads its page count and bookmarks/TOC. Safe to run
@@ -80,6 +90,7 @@ func Prepare(path string) (*Document, error) {
 		cache:     newPageCache(pageCacheCapacity),
 		Bookmarks: NewBookmarkManager(),
 		textCache: map[int]string{},
+		lineCache: map[int][]textLine{},
 	}
 
 	if err := d.rebuildDoc(); err != nil {

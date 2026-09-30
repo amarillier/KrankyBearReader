@@ -174,8 +174,41 @@ func (hp *highlightsPanel) changeSelectedColor() {
 	}
 	showHighlightColorPicker(hp.v.win, h.Color, func(rgb [3]float64) {
 		hp.v.doc.SetHighlightColor(h, rgb)
-		hp.v.repaintPage(h.Page)
+		// Deselect rather than just repaint: found via real hands-on
+		// testing that the selection outline (selectionOutlineColor,
+		// solid blue) is drawn on top of the shape's own stroke, right
+		// along the same edges for an axis-aligned or near-rectangular
+		// shape (Square, a speech bubble's box, part of a Polygon) — so
+		// the new color wasn't always visible at all until the outline
+		// was gone. deselect() already repaints the affected page itself
+		// (see its own doc comment), so no separate repaintPage call is
+		// needed here.
+		hp.deselect()
 	})
+}
+
+// deselect clears the currently-selected highlight, if any — the reverse
+// of hp.list.OnSelected: unselects the panel's own list row, clears
+// Document.selectedHighlight (dropping its on-page outline), and repaints
+// whichever page it was on so the outline actually disappears. A no-op
+// when nothing is selected, so callers (Escape, clicking empty page
+// space) don't need to check first.
+//
+// Exists specifically so a stray Delete/Backspace keypress, or later, a
+// stray drag once shape move/edit exists, can't act on a selection the
+// user no longer means to have live — matching the request that added
+// this: an easy, deliberate way to back out of a selection before it
+// causes an accidental delete/edit, not just delete/edit's own confirm
+// dialogs alone.
+func (hp *highlightsPanel) deselect() {
+	h := hp.selected
+	if h == nil {
+		return
+	}
+	hp.selected = nil
+	hp.v.doc.SetSelectedHighlight(nil)
+	hp.list.UnselectAll()
+	hp.v.repaintPage(h.Page)
 }
 
 // deleteSelected removes the selected highlight from the list and clears

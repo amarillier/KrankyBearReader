@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"image"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -225,6 +226,164 @@ func TestSaveHighlights_AddRoundTrips(t *testing.T) {
 	if got.Page != 1 || got.Contents != "new one" || got.Color != [3]float64{1, 0, 0} {
 		t.Errorf("expected page 1, caption %q, color %v; got page %d, caption %q, color %v",
 			"new one", [3]float64{1, 0, 0}, got.Page, got.Contents, got.Color)
+	}
+}
+
+// TestSaveHighlights_ShapeAddRoundTrips covers the three shape kinds this
+// app can author itself (AddRectShape's Square/Circle, AddLineShape's
+// Line — see newAnnotationForShape): each one added in memory, saved,
+// and reloaded fresh from disk, confirming both the right pdfcpu
+// annotation type got written (Kind survives the round trip) and its own
+// geometry/color came back correctly.
+func TestSaveHighlights_ShapeAddRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.pdf")
+	writeMinimalPDF(t, path)
+
+	doc := &Document{path: path, cache: newPageCache(pageCacheCapacity)}
+	doc.AddRectShape(1, "Square", [4]float64{10, 10, 60, 60}, [3]float64{1, 0, 0})
+	doc.AddRectShape(1, "Circle", [4]float64{70, 70, 150, 130}, [3]float64{0, 1, 0})
+	doc.AddLineShape(1, []float64{20, 30, 80, 90}, [2]string{"None", "ClosedArrow"}, [3]float64{0, 0, 1})
+
+	if err := doc.SaveHighlights(path); err != nil {
+		t.Fatalf("SaveHighlights: %v", err)
+	}
+
+	if len(doc.Highlights) != 3 {
+		t.Fatalf("expected 3 reloaded shapes, got %d: %+v", len(doc.Highlights), doc.Highlights)
+	}
+
+	byKind := map[string]*Highlight{}
+	for _, h := range doc.Highlights {
+		if h.ObjNr <= 0 {
+			t.Errorf("expected a real ObjNr for reloaded kind=%s, got %d", h.Kind, h.ObjNr)
+		}
+		byKind[h.Kind] = h
+	}
+
+	square := byKind["Square"]
+	if square == nil {
+		t.Fatalf("expected a reloaded Square, got none among %+v", doc.Highlights)
+	}
+	if square.Rect != [4]float64{10, 10, 60, 60} {
+		t.Errorf("Square.Rect = %v, want [10 10 60 60]", square.Rect)
+	}
+
+	circle := byKind["Circle"]
+	if circle == nil {
+		t.Fatalf("expected a reloaded Circle, got none among %+v", doc.Highlights)
+	}
+	if circle.Rect != [4]float64{70, 70, 150, 130} {
+		t.Errorf("Circle.Rect = %v, want [70 70 150 130]", circle.Rect)
+	}
+
+	line := byKind["Line"]
+	if line == nil {
+		t.Fatalf("expected a reloaded Line, got none among %+v", doc.Highlights)
+	}
+	if len(line.Line) != 4 || line.Line[0] != 20 || line.Line[1] != 30 || line.Line[2] != 80 || line.Line[3] != 90 {
+		t.Errorf("Line.Line = %v, want [20 30 80 90]", line.Line)
+	}
+	if line.LineEndStyle != [2]string{"None", "ClosedArrow"} {
+		t.Errorf("Line.LineEndStyle = %v, want [None ClosedArrow]", line.LineEndStyle)
+	}
+	if line.Color != [3]float64{0, 0, 1} {
+		t.Errorf("Line.Color = %v, want [0 0 1]", line.Color)
+	}
+}
+
+// TestSaveHighlights_PolygonAndFreeTextRoundTrips covers the two newest
+// TestNewAnnotationForShape_FreeTextAlwaysHasBorderWidth confirms both a
+// plain text block and a speech bubble are authored with the same
+// defaultShapeBorderWidthPt — deliberately NOT 0 for a plain text block,
+// even though that would better match Preview's own borderless style,
+// because it was confirmed empirically to have no effect on MuPDF's own
+// rendering (it draws a border regardless of /BS) — see
+// newAnnotationForShape's own doc comment on why that idea was tried and
+// reverted, not just never attempted.
+func TestNewAnnotationForShape_FreeTextAlwaysHasBorderWidth(t *testing.T) {
+	plain := &Highlight{Kind: "FreeText", Rect: [4]float64{0, 0, 100, 50}, Contents: "hi"}
+	ann, ok := newAnnotationForShape(plain).(model.FreeTextAnnotation)
+	if !ok {
+		t.Fatalf("expected a model.FreeTextAnnotation, got %T", newAnnotationForShape(plain))
+	}
+	if ann.BorderWidth != defaultShapeBorderWidthPt {
+		t.Errorf("plain text block BorderWidth = %v, want %v", ann.BorderWidth, defaultShapeBorderWidthPt)
+	}
+
+	tip := [2]float64{-5, -5}
+	bubble := &Highlight{Kind: "FreeText", Rect: [4]float64{0, 0, 100, 50}, Contents: "hi", CalloutTip: &tip}
+	ann2, ok := newAnnotationForShape(bubble).(model.FreeTextAnnotation)
+	if !ok {
+		t.Fatalf("expected a model.FreeTextAnnotation, got %T", newAnnotationForShape(bubble))
+	}
+	if ann2.BorderWidth != defaultShapeBorderWidthPt {
+		t.Errorf("speech bubble BorderWidth = %v, want %v", ann2.BorderWidth, defaultShapeBorderWidthPt)
+	}
+}
+
+// TestSaveHighlights_PolygonAndFreeTextRoundTrips covers the two newest
+// authored kinds: a Star/Hexagon (always written as a generic Polygon —
+// see AddPolygonShape's own doc comment, PDF has no dedicated subtype for
+// either) and a plain text block plus a speech bubble (both FreeText, the
+// callout line being the only difference — see AddTextShape). Confirms
+// each survives a real save + fresh reload with the right Kind, Rect, and
+// (for FreeText) caption text.
+func TestSaveHighlights_PolygonAndFreeTextRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.pdf")
+	writeMinimalPDF(t, path)
+
+	doc := &Document{path: path, cache: newPageCache(pageCacheCapacity)}
+	star := starVertices(50, 50, 40, 40)
+	doc.AddPolygonShape(1, star, [3]float64{1, 1, 0})
+	tip := [2]float64{5, 5}
+	doc.AddTextShape(1, [4]float64{10, 10, 110, 60}, nil, "a plain text block", [3]float64{0, 0, 0})
+	doc.AddTextShape(1, [4]float64{120, 70, 190, 130}, &tip, "speech bubble text", [3]float64{0, 0, 1})
+
+	if err := doc.SaveHighlights(path); err != nil {
+		t.Fatalf("SaveHighlights: %v", err)
+	}
+
+	if len(doc.Highlights) != 3 {
+		t.Fatalf("expected 3 reloaded shapes, got %d: %+v", len(doc.Highlights), doc.Highlights)
+	}
+
+	var polygon *Highlight
+	var freeTexts []*Highlight
+	for _, h := range doc.Highlights {
+		if h.ObjNr <= 0 {
+			t.Errorf("expected a real ObjNr for reloaded kind=%s, got %d", h.Kind, h.ObjNr)
+		}
+		switch h.Kind {
+		case "Polygon":
+			polygon = h
+		case "FreeText":
+			freeTexts = append(freeTexts, h)
+		}
+	}
+
+	if polygon == nil {
+		t.Fatalf("expected a reloaded Polygon (the star), got none among %+v", doc.Highlights)
+	}
+	wantMinX, wantMinY, wantMaxX, wantMaxY := verticesBoundsPt(star)
+	want := [4]float64{wantMinX, wantMinY, wantMaxX, wantMaxY}
+	for i := range want {
+		if math.Abs(polygon.Rect[i]-want[i]) > 0.01 { // PDF's own text representation loses a little precision on round trip
+			t.Errorf("Polygon.Rect = %v, want %v (the star's own bounding box)", polygon.Rect, want)
+			break
+		}
+	}
+
+	if len(freeTexts) != 2 {
+		t.Fatalf("expected 2 reloaded FreeText annotations, got %d", len(freeTexts))
+	}
+	gotContents := map[string]bool{}
+	for _, ft := range freeTexts {
+		gotContents[ft.Contents] = true
+	}
+	if !gotContents["a plain text block"] || !gotContents["speech bubble text"] {
+		t.Errorf("expected both FreeText captions reloaded, got %v", gotContents)
 	}
 }
 

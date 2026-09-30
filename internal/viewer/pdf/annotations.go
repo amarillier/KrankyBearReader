@@ -83,8 +83,32 @@ type Highlight struct {
 	// min-before-max — see parseRectPt). Just enough geometry to
 	// click-select (HighlightAt) and outline (paintHighlights) one of
 	// these; there's no per-kind geometry parsing to paint or recolor
-	// them with, see this struct's own doc comment.
+	// most of them with, see this struct's own doc comment — Polygon and
+	// FreeText are the two exceptions this app authors itself (see
+	// Vertices/CalloutTip below), so they carry real geometry alongside
+	// Rect for their own hand-paint preview.
 	Rect [4]float64
+
+	// Vertices is populated for a freshly-drawn (ObjNr == 0), not-yet-
+	// saved Kind == "Polygon" only — Star or Hexagon, see
+	// AddPolygonShape/view_render.go's starVertices/hexagonVertices. PDF
+	// user-space points, one [2]float64 per vertex, in drawing order; the
+	// shape closes back to the first vertex. Never populated when reading
+	// an existing Polygon back from a real file (pdfcpu's own read path
+	// doesn't carry /Vertices back any more than it does /QuadPoints or
+	// /L — see highlightGeometry/lineGeometry's own doc comments for the
+	// same gap) — an already-saved Polygon only ever needs Rect, since
+	// MuPDF's own rendering already paints it correctly.
+	Vertices [][2]float64
+
+	// CalloutTip is populated for a freshly-drawn (ObjNr == 0), not-yet-
+	// saved Kind == "FreeText" only when it's a speech bubble rather than
+	// a plain text block — see AddTextShape. PDF user-space points: the
+	// far end of the callout line/tail, pointing away from the text box
+	// itself (Rect). nil for a plain text block, and (same reasoning as
+	// Vertices above) never populated when reading an existing FreeText
+	// back from a real file.
+	CalloutTip *[2]float64
 
 	// origContents and origColor snapshot Contents/Color as loaded from
 	// disk, for an already-saved highlight only (ObjNr > 0) — see
@@ -155,14 +179,40 @@ var paintableMarkupKinds = map[string]bool{
 	"Squiggly":  true,
 }
 
-// hasPaintedColor reports whether kind's Color field is real — read back
-// from the PDF's own /C — and so safe to write back on save or offer for
-// recoloring: every paintableMarkupKinds kind, plus "Line" (lineGeometry
-// reads /C too, just alongside /L instead of /QuadPoints). Used by
-// SaveHighlights and the Highlights panel's color picker, the same two
-// places paintableMarkupKinds alone used to gate before Line existed.
+// authoredGenericKinds are the genericRectKinds members this app can
+// itself author (see AddRectShape/AddPolygonShape/AddTextShape) — as
+// opposed to Stamp/PolyLine/Ink/Caret, which it only ever reads back from
+// another app and has no per-kind geometry to hand-paint at all. Shared
+// between hasPaintedColor (below) and anywhere else that needs to
+// distinguish "a shape kind this app draws" from "a shape kind this app
+// only lists/deletes."
+var authoredGenericKinds = map[string]bool{
+	"Square":   true,
+	"Circle":   true,
+	"Polygon":  true,
+	"FreeText": true,
+}
+
+// hasPaintedColor reports whether kind's Color field means anything —
+// either read back from a real PDF's own /C (every paintableMarkupKinds
+// kind, plus "Line" — lineGeometry reads /C too, just alongside /L
+// instead of /QuadPoints), or, for authoredGenericKinds, simply because
+// this app is the one that set it in the first place when the shape was
+// drawn (AddRectShape/AddPolygonShape/AddTextShape all take an initial
+// color). Used by SaveHighlights (deciding whether a /C rewrite is
+// needed) and the Highlights panel's color picker (deciding whether
+// "Change Color" does anything at all).
+//
+// Recoloring an authoredGenericKinds shape is safe regardless of whether
+// THIS app or another one originally created it: Square/Circle/FreeText's
+// own hand-paint only ever needs Rect (+Contents for FreeText), both
+// always populated for any already-saved annotation — see
+// paintHighlights' own Polygon case for the one kind that needs an extra
+// safeguard (Vertices is only ever populated for a shape THIS app drew;
+// an already-saved Polygon from another app has none, so its hand-paint
+// falls back to a plain Rect outline rather than painting nothing).
 func hasPaintedColor(kind string) bool {
-	return paintableMarkupKinds[kind] || kind == "Line"
+	return paintableMarkupKinds[kind] || kind == "Line" || authoredGenericKinds[kind]
 }
 
 // defaultHighlightColor is standard highlighter yellow, used when a PDF's
@@ -555,14 +605,48 @@ func (d *Document) paintHighlights(img *image.RGBA, page int, dpi float64) {
 		needsHandPaint := h.ObjNr == 0 || colorChanged
 
 		if hasGenericRect {
-			// No fill/hand-paint here at all — see Highlight.Rect's own
-			// doc comment: there's no per-kind geometry to draw with, and
-			// MuPDF's own render (see needsHandPaint's doc comment above)
-			// already paints this kind correctly from its baked /AP
-			// appearance stream. Only a selection outline, same UI
-			// affordance as every other kind gets.
+			// Square/Circle/Polygon/FreeText are the kinds this app can
+			// itself author (see AddRectShape/AddPolygonShape/
+			// AddTextShape) and so the only ones ever hand-painted here,
+			// only while needsHandPaint (in practice, only ObjNr == 0 —
+			// freshly drawn, not yet saved; none of these four have a
+			// recolor UI, so colorChanged is never true for them). Every
+			// OTHER genericRectKinds member (Stamp, PolyLine, Ink, Caret)
+			// has no per-kind geometry this app can draw at all — see
+			// Highlight.Rect's own doc comment — and isn't ever authored
+			// by this app either, so needsHandPaint should never be true
+			// for one in practice; MuPDF's own render (see
+			// needsHandPaint's doc comment above) already paints anything
+			// already-saved correctly from its baked /AP appearance
+			// stream regardless.
+			r := rectPixelRect(h.Rect, pageHeightPt, scale)
+			if needsHandPaint {
+				switch h.Kind {
+				case "Square":
+					drawRectOutline(img, r, lineCol, defaultShapeStrokeWidthPx(scale))
+				case "Circle":
+					drawEllipseOutline(img, r, lineCol, float64(defaultShapeStrokeWidthPx(scale)))
+				case "Polygon":
+					if len(h.Vertices) >= 3 {
+						drawPolygonOutline(img, polygonPixelVertices(h.Vertices, pageHeightPt, scale), lineCol, float64(defaultShapeStrokeWidthPx(scale)))
+					} else {
+						// An already-saved Polygon this app didn't draw
+						// itself (e.g. a real Preview-authored one) has no
+						// Vertices at all — see Highlight.Vertices' own doc
+						// comment. Recoloring one now falls into this same
+						// hand-paint path (hasPaintedColor includes
+						// "Polygon" — see its own doc comment), so without
+						// this fallback a recolor would delete it from the
+						// scratch copy and then paint nothing back at all,
+						// making it vanish instead of changing color.
+						drawRectOutline(img, r, lineCol, defaultShapeStrokeWidthPx(scale))
+					}
+				case "FreeText":
+					drawFreeTextPreview(img, r, h, pageHeightPt, scale, lineCol)
+				}
+			}
 			if h == d.selectedHighlight {
-				drawRectOutline(img, rectPixelRect(h.Rect, pageHeightPt, scale), selectionOutlineColor, selectionOutlineWidth)
+				drawRectOutline(img, r, selectionOutlineColor, selectionOutlineWidth)
 			}
 			continue
 		}
@@ -611,6 +695,20 @@ func (d *Document) paintHighlights(img *image.RGBA, page int, dpi float64) {
 				drawRectOutline(img, r, selectionOutlineColor, selectionOutlineWidth)
 			}
 		}
+	}
+
+	if d.searchHighlightPage == page && d.searchHighlightRect != [4]float64{} {
+		if !haveBounds {
+			_, height, err := d.PageBoundsPt(page)
+			if err != nil {
+				return
+			}
+			pageHeightPt = height
+			haveBounds = true
+		}
+		r := rectPixelRect(d.searchHighlightRect, pageHeightPt, scale)
+		drawTranslucentRect(img, r, searchHighlightFillColor)
+		drawRectOutline(img, r, searchHighlightOutlineColor, selectionOutlineWidth)
 	}
 }
 
@@ -675,6 +773,83 @@ func rectPixelRect(rect [4]float64, pageHeightPt, scale float64) image.Rectangle
 		int(rect[0]*scale), int((pageHeightPt-rect[3])*scale),
 		int(rect[2]*scale), int((pageHeightPt-rect[1])*scale),
 	)
+}
+
+// polygonPixelVertices converts a freshly-drawn Polygon's own Vertices
+// (PDF user-space points) into image-pixel points, one per vertex — same
+// scale-and-flip-Y convention as every other PDF-space-to-pixel
+// converter in this file, just per-point instead of per-rect/quad.
+func polygonPixelVertices(vertices [][2]float64, pageHeightPt, scale float64) [][2]float64 {
+	out := make([][2]float64, len(vertices))
+	for i, v := range vertices {
+		out[i] = [2]float64{v[0] * scale, (pageHeightPt - v[1]) * scale}
+	}
+	return out
+}
+
+// drawPolygonOutline strokes a closed polygon (vertices already in image
+// pixels — see polygonPixelVertices), connecting each vertex to the next
+// and closing back to the first, by reusing strokeLine for every edge —
+// the same "compose from existing straight-line-stroking code" approach
+// drawLineAnnotation's own shaft already uses, rather than a general
+// polygon-stroking algorithm this file has never needed before. Used for
+// Star/Hexagon's own hand-paint preview (paintHighlights' needsHandPaint
+// gate) — any other closed shape this app might author later as a
+// Polygon annotation would reuse this unchanged, only the vertex
+// generator (view_render.go's starVertices/hexagonVertices) differs.
+func drawPolygonOutline(img *image.RGBA, vertices [][2]float64, col color.NRGBA, widthPx float64) {
+	n := len(vertices)
+	if n < 2 {
+		return
+	}
+	for i := 0; i < n; i++ {
+		a, b := vertices[i], vertices[(i+1)%n]
+		strokeLine(img, a, b, widthPx, col)
+	}
+}
+
+// defaultShapeStrokeWidthPx converts defaultShapeBorderWidthPt (the same
+// /BS /W value a freshly-drawn Square/Circle is authored with — see
+// highlight_edit.go) into already-scaled image pixels, floored to 1px so
+// the stroke never vanishes at a low zoom — the same floor pattern
+// drawLineAnnotation/markupLineRect already use for their own strokes.
+func defaultShapeStrokeWidthPx(scale float64) int {
+	px := int(defaultShapeBorderWidthPt * scale)
+	if px < 1 {
+		px = 1
+	}
+	return px
+}
+
+// drawEllipseOutline paints a Circle annotation's stroke: an ellipse
+// inscribed within r, stamping small squares at even angular steps around
+// its circumference — the same "stamp along a path, don't pull in a
+// general rasterizer" philosophy drawSquigglyLine/strokeLine already use
+// elsewhere in this file. Only ever called for a freshly-drawn (not yet
+// saved) Circle — see paintHighlights' own needsHandPaint gate — so exact
+// smoothness at extreme zoom is not a concern this needs to solve for.
+func drawEllipseOutline(img *image.RGBA, r image.Rectangle, col color.NRGBA, widthPx float64) {
+	cx, cy := float64(r.Min.X+r.Max.X)/2, float64(r.Min.Y+r.Max.Y)/2
+	rx, ry := float64(r.Dx())/2, float64(r.Dy())/2
+	if rx <= 0 || ry <= 0 {
+		return
+	}
+	half := widthPx / 2
+	if half < 0.5 {
+		half = 0.5
+	}
+	steps := int(4 * (rx + ry)) // dense enough not to leave gaps around the perimeter
+	if steps < 16 {
+		steps = 16
+	}
+	bounds := img.Bounds()
+	for i := 0; i <= steps; i++ {
+		theta := 2 * math.Pi * float64(i) / float64(steps)
+		x := cx + rx*math.Cos(theta)
+		y := cy + ry*math.Sin(theta)
+		seg := image.Rect(int(x-half), int(y-half), int(x+half)+1, int(y+half)+1)
+		draw.Draw(img, seg.Intersect(bounds), image.NewUniform(col), image.Point{}, draw.Over)
+	}
 }
 
 // markupLineRect converts one quad into a thin image-pixel rectangle for a
@@ -959,6 +1134,16 @@ var selectionOutlineColor = color.NRGBA{R: 0, G: 120, B: 255, A: 255}
 
 const selectionOutlineWidth = 3
 
+// searchHighlightFillColor/OutlineColor mark the find bar's current match
+// (see Document.SetSearchHighlight) — orange, deliberately distinct from
+// both the blue selection outline above and every annotation Highlight
+// color a real file is likely to use, so a search match is never confused
+// with either.
+var (
+	searchHighlightFillColor    = color.NRGBA{R: 255, G: 140, B: 0, A: highlightOverlayAlpha}
+	searchHighlightOutlineColor = color.NRGBA{R: 255, G: 140, B: 0, A: 255}
+)
+
 // drawRectOutline draws a solid border of the given width just inside r's
 // edges — four filled strips rather than a general stroke primitive, which
 // is all a purely axis-aligned rectangle (see quadPixelRect's own doc
@@ -1006,6 +1191,24 @@ func quadBoundsPt(q [8]float64) (minX, minY, maxX, maxY float64) {
 		x, y := q[i*2], q[i*2+1]
 		minX, maxX = min(minX, x), max(maxX, x)
 		minY, maxY = min(minY, y), max(maxY, y)
+	}
+	return minX, minY, maxX, maxY
+}
+
+// verticesBoundsPt returns vertices' axis-aligned bounding box in PDF
+// user-space points — quadBoundsPt's own sibling for a Polygon's
+// arbitrary vertex count instead of a quad's fixed 4 corners. Used by
+// AddPolygonShape to derive Highlight.Rect (click-select/outline geometry
+// — see its own doc comment) from Vertices at draw time. Panics on an
+// empty slice, same as indexing vertices[0] always would — callers only
+// ever pass a real, already-generated shape's vertices (starVertices/
+// hexagonVertices), never an empty one.
+func verticesBoundsPt(vertices [][2]float64) (minX, minY, maxX, maxY float64) {
+	minX, maxX = vertices[0][0], vertices[0][0]
+	minY, maxY = vertices[0][1], vertices[0][1]
+	for _, v := range vertices[1:] {
+		minX, maxX = min(minX, v[0]), max(maxX, v[0])
+		minY, maxY = min(minY, v[1]), max(maxY, v[1])
 	}
 	return minX, minY, maxX, maxY
 }

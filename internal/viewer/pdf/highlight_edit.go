@@ -47,6 +47,69 @@ func (d *Document) AddHighlight(page int, quads [][8]float64, rgb [3]float64, ca
 	return h
 }
 
+// addShape appends h to d.Highlights, re-sorted by page, and clears the
+// render cache — the exact bookkeeping AddHighlight/AddRectShape/
+// AddLineShape all share, factored out once a second and third "add a new
+// shape" method existed (AddHighlight itself predates this and could be
+// rewritten in terms of it, but isn't, to avoid an unrelated diff on
+// already-working, already-tested code).
+func (d *Document) addShape(h *Highlight) *Highlight {
+	d.Highlights = append(d.Highlights, h)
+	sort.SliceStable(d.Highlights, func(i, j int) bool { return d.Highlights[i].Page < d.Highlights[j].Page })
+	d.cache.Clear()
+	return h
+}
+
+// AddRectShape creates a new Square- or Circle-kind annotation in memory,
+// covering rect ([minX, minY, maxX, maxY], PDF user-space points, origin
+// bottom-left — same convention as Highlight.Rect) on page, with rgb as
+// its stroke color. Nothing reaches disk until SaveHighlights runs; the
+// returned Highlight has ObjNr == 0 until then, same as AddHighlight.
+// kind must be "Square" or "Circle" — see genericRectKinds — anything
+// else is a caller bug, not a user-facing error, so this doesn't validate
+// it.
+func (d *Document) AddRectShape(page int, kind string, rect [4]float64, rgb [3]float64) *Highlight {
+	return d.addShape(&Highlight{Page: page, Kind: kind, Rect: rect, Color: rgb})
+}
+
+// AddLineShape creates a new Line-kind annotation (a straight line or
+// arrow) in memory, from line's two endpoints ([x1, y1, x2, y2], PDF
+// user-space points — same convention as Highlight.Line) with endStyle
+// ([start, end] — see Highlight.LineEndStyle) and rgb as its color.
+// Nothing reaches disk until SaveHighlights runs; the returned Highlight
+// has ObjNr == 0 until then, same as AddHighlight.
+func (d *Document) AddLineShape(page int, line []float64, endStyle [2]string, rgb [3]float64) *Highlight {
+	return d.addShape(&Highlight{Page: page, Kind: "Line", Line: line, LineEndStyle: endStyle, Color: rgb})
+}
+
+// AddPolygonShape creates a new Polygon-kind annotation in memory — a
+// Star or Hexagon (see view_render.go's starVertices/hexagonVertices;
+// PDF itself has no dedicated subtype for either, so both are authored
+// as a generic Polygon, same as any other closed-shape annotation) — from
+// vertices (PDF user-space points, one [2]float64 per vertex, in drawing
+// order; the shape closes back to the first), with rgb as its stroke
+// color. Rect is derived from vertices' own bounding box, the same
+// click-select/outline geometry every genericRectKinds member carries.
+// Nothing reaches disk until SaveHighlights runs; the returned Highlight
+// has ObjNr == 0 until then, same as AddHighlight/AddRectShape/
+// AddLineShape.
+func (d *Document) AddPolygonShape(page int, vertices [][2]float64, rgb [3]float64) *Highlight {
+	minX, minY, maxX, maxY := verticesBoundsPt(vertices)
+	return d.addShape(&Highlight{Page: page, Kind: "Polygon", Vertices: vertices, Rect: [4]float64{minX, minY, maxX, maxY}, Color: rgb})
+}
+
+// AddTextShape creates a new FreeText-kind annotation in memory — a plain
+// text block (calloutTip nil) or a speech bubble (calloutTip set to the
+// tail's far end, in PDF user-space points — see view_render.go's
+// calloutTipFor) — covering rect ([minX, minY, maxX, maxY], PDF
+// user-space points) on page, with caption as its text content and rgb
+// as its stroke/text color. Nothing reaches disk until SaveHighlights
+// runs; the returned Highlight has ObjNr == 0 until then, same as every
+// other Add* method.
+func (d *Document) AddTextShape(page int, rect [4]float64, calloutTip *[2]float64, caption string, rgb [3]float64) *Highlight {
+	return d.addShape(&Highlight{Page: page, Kind: "FreeText", Rect: rect, CalloutTip: calloutTip, Contents: caption, Color: rgb})
+}
+
 // DeleteHighlight removes h — geometry, color, caption, all of it —
 // immediately from the in-memory list and clears the page cache, so it
 // disappears on the very next RenderPage call. For a not-yet-saved
@@ -199,14 +262,13 @@ func (d *Document) SaveHighlights(outputPath string) error {
 
 	newByPage := map[int][]model.AnnotationRenderer{}
 	for _, h := range d.Highlights {
-		if h.ObjNr > 0 || len(h.Quads) == 0 {
-			continue // already on disk, or has no geometry to write
+		if h.ObjNr > 0 {
+			continue // already on disk
 		}
-		minX, minY, maxX, maxY := quadBoundsPt(h.Quads[0])
-		rect := types.NewRectangle(minX, minY, maxX, maxY)
-		quad := types.QuadPoints{*types.NewQuadLiteralForRect(rect)}
-		col := rgbToSimpleColor(h.Color)
-		ann := model.NewHighlightAnnotation(*rect, 0, h.Contents, "", "", 0, &col, 0, 0, 0, "", nil, nil, "", "", quad)
+		ann := newAnnotationForShape(h)
+		if ann == nil {
+			continue // no geometry to write -- shouldn't happen for anything created via this app's own Add* methods
+		}
 		newByPage[h.Page] = append(newByPage[h.Page], ann)
 	}
 	if len(newByPage) > 0 {
@@ -442,4 +504,155 @@ func (d *Document) SetHighlightColor(h *Highlight, rgb [3]float64) {
 // and for rewriting an existing one's /C in SaveHighlights.
 func rgbToSimpleColor(rgb [3]float64) color.SimpleColor {
 	return color.SimpleColor{R: float32(rgb[0]), G: float32(rgb[1]), B: float32(rgb[2])}
+}
+
+// defaultShapeBorderWidthPt is the /BS /W (border width) a freshly-drawn
+// Square/Circle/Line shape is authored with — the same PDF spec default
+// this app already assumes when READING a Line with no /BS at all (see
+// defaultLineWidthPt); used here for WRITING one, since AddRectShape/
+// AddLineShape don't currently expose a way to choose a different width.
+const defaultShapeBorderWidthPt = 1.0
+
+// lineRectPadPt pads a freshly-drawn Line's own /Rect beyond its raw /L
+// endpoints — a real annotation's /Rect is always somewhat larger than
+// its /L span, to leave room for the border stroke and any arrowhead
+// (confirmed by inspecting real Preview-authored lines earlier this
+// project — see CLAUDE.md's own note on a stale /L needing repair against
+// /Rect). A plain fixed pad is enough for a freshly-authored shape (no
+// stale-data problem to work around here, unlike that repair case).
+const lineRectPadPt = 10.0
+
+// newAnnotationForShape builds the pdfcpu annotation to write for a
+// not-yet-saved (ObjNr == 0) Highlight, based on its Kind: Highlight
+// (AddHighlight's own quad-based geometry), Square/Circle (AddRectShape's
+// own Rect-based geometry), or Line (AddLineShape's own two-endpoint
+// geometry) — the three kinds this app can currently author (see
+// ReleaseNotes' Future ideas for what's still authoring-only-via-other-
+// apps). Returns nil for anything with no geometry to write, or any other
+// Kind (Underline/Strikeout/Squiggly/Note/every genericRectKinds member
+// besides Square/Circle) — this app doesn't create those itself, so
+// SaveHighlights' own caller just skips a nil rather than treating it as
+// an error.
+func newAnnotationForShape(h *Highlight) model.AnnotationRenderer {
+	col := rgbToSimpleColor(h.Color)
+	switch h.Kind {
+	case "Highlight":
+		if len(h.Quads) == 0 {
+			return nil
+		}
+		minX, minY, maxX, maxY := quadBoundsPt(h.Quads[0])
+		rect := types.NewRectangle(minX, minY, maxX, maxY)
+		quad := types.QuadPoints{*types.NewQuadLiteralForRect(rect)}
+		return model.NewHighlightAnnotation(*rect, 0, h.Contents, "", "", 0, &col, 0, 0, 0, "", nil, nil, "", "", quad)
+
+	case "Square", "Circle":
+		if h.Rect == [4]float64{} {
+			return nil
+		}
+		rect := types.NewRectangle(h.Rect[0], h.Rect[1], h.Rect[2], h.Rect[3])
+		if h.Kind == "Square" {
+			return model.NewSquareAnnotation(*rect, 0, h.Contents, "", "", 0, &col, "", nil, nil, "", "",
+				nil, 0, 0, 0, 0, defaultShapeBorderWidthPt, model.BSSolid, false, 0)
+		}
+		return model.NewCircleAnnotation(*rect, 0, h.Contents, "", "", 0, &col, "", nil, nil, "", "",
+			nil, 0, 0, 0, 0, defaultShapeBorderWidthPt, model.BSSolid, false, 0)
+
+	case "Line":
+		if len(h.Line) != 4 {
+			return nil
+		}
+		minX, maxX := min(h.Line[0], h.Line[2])-lineRectPadPt, max(h.Line[0], h.Line[2])+lineRectPadPt
+		minY, maxY := min(h.Line[1], h.Line[3])-lineRectPadPt, max(h.Line[1], h.Line[3])+lineRectPadPt
+		rect := types.NewRectangle(minX, minY, maxX, maxY)
+		p1 := types.Point{X: h.Line[0], Y: h.Line[1]}
+		p2 := types.Point{X: h.Line[2], Y: h.Line[3]}
+		beginStyle := lineEndingStyleFromName(h.LineEndStyle[0])
+		endStyle := lineEndingStyleFromName(h.LineEndStyle[1])
+		return model.NewLineAnnotation(*rect, 0, h.Contents, "", "", 0, &col, "", nil, nil, "", "",
+			p1, p2, beginStyle, endStyle, 0, 0, 0, nil, nil, false, false, 0, 0, nil, defaultShapeBorderWidthPt, model.BSSolid)
+
+	case "Polygon":
+		if len(h.Vertices) < 3 {
+			return nil
+		}
+		minX, minY, maxX, maxY := verticesBoundsPt(h.Vertices)
+		rect := types.NewRectangle(minX, minY, maxX, maxY)
+		flat := make([]float64, 0, len(h.Vertices)*2)
+		for _, v := range h.Vertices {
+			flat = append(flat, v[0], v[1])
+		}
+		vertices := types.NewNumberArray(flat...)
+		return model.NewPolygonAnnotation(*rect, 0, h.Contents, "", "", 0, &col, "", nil, nil, "", "",
+			vertices, nil, nil, nil, nil, defaultShapeBorderWidthPt, model.BSSolid, false, 0)
+
+	case "FreeText":
+		if h.Rect == [4]float64{} {
+			return nil
+		}
+		rect := types.NewRectangle(h.Rect[0], h.Rect[1], h.Rect[2], h.Rect[3])
+		var callOutLine types.Array
+		var intent *model.FreeTextIntent
+		if h.CalloutTip != nil {
+			// Anchor at the box's own bottom-left corner, matching
+			// drawFreeTextPreview's own hand-paint anchor exactly — no
+			// arrowhead/ending style either end (callOutLineEndingStyle
+			// nil below), so which end pdfcpu/MuPDF considers "start" vs
+			// "end" has no visual effect.
+			callOutLine = types.NewNumberArray(h.CalloutTip[0], h.CalloutTip[1], h.Rect[0], h.Rect[1])
+			it := model.IntentFreeTextCallout
+			intent = &it
+		}
+		// borderWidth is always defaultShapeBorderWidthPt, even for a
+		// plain text block — NOT because a plain text block should have
+		// a visible border (Preview's own default "Text" tool has none),
+		// but because setting it to 0 (omitting /BS entirely) turned out
+		// to have NO effect on MuPDF's own rendering: confirmed
+		// empirically that MuPDF draws a border around a FreeText with
+		// no baked /AP unconditionally, regardless of /BS's presence or
+		// width. Preview achieves its own borderless look by baking a
+		// custom appearance stream with no border path at all — a much
+		// bigger authoring effort (real content-stream + font-resource
+		// authoring) than a border-width parameter, and not attempted
+		// here. See drawFreeTextPreview's own doc comment for why the
+		// in-app preview also deliberately keeps the border, rather than
+		// looking different from what Save will actually produce.
+		return model.NewFreeTextAnnotation(*rect, 0, h.Contents, "", "", 0, &col, "", nil, nil, "", "",
+			"", types.AlignLeft, "", 0, &col, "", intent, callOutLine, nil, 0, 0, 0, 0, defaultShapeBorderWidthPt, model.BSSolid, false, 0)
+
+	default:
+		return nil
+	}
+}
+
+// lineEndingStyleFromName maps the PDF /LE name strings this app already
+// uses everywhere else (Highlight.LineEndStyle, drawArrowHead's own
+// switch) to pdfcpu's model.LineEndingStyle enum — needed only when
+// authoring a brand-new Line annotation (newAnnotationForShape above);
+// reading one back never needs this, since lineGeometry keeps the raw
+// /LE name string as-is. Falls back to LENone for anything unrecognized,
+// matching how this app already treats an absent/unrecognized /LE
+// everywhere else.
+func lineEndingStyleFromName(name string) *model.LineEndingStyle {
+	les := model.LENone
+	switch name {
+	case "Square":
+		les = model.LESquare
+	case "Circle":
+		les = model.LECircle
+	case "Diamond":
+		les = model.LEDiamond
+	case "OpenArrow":
+		les = model.LEOpenArrow
+	case "ClosedArrow":
+		les = model.LEClosedArrow
+	case "Butt":
+		les = model.LEButt
+	case "ROpenArrow":
+		les = model.LEROpenArrow
+	case "RClosedArrow":
+		les = model.LERClosedArrow
+	case "Slash":
+		les = model.LESlash
+	}
+	return &les
 }
