@@ -189,3 +189,272 @@ func TestHighlightDrawer_TappedNoCorrectionWhenSizesMatch(t *testing.T) {
 		t.Errorf("OnTapped got pos %v, want the untranslated (37,42)", gotPos)
 	}
 }
+
+// matchingHitTest returns a HitTestSelected stand-in that always reports a
+// hit at the given bounds — good enough for these gesture-classification
+// tests, which only care whether OnMoved fires, not the real per-kind
+// bounding-box math (covered separately in annotations_test.go's own
+// TestHighlightBoundsPt* and view_render.go's handleHighlightMoveHitTest).
+func matchingHitTest(tl, br fyne.Position) func(fyne.Position, fyne.Size) (fyne.Position, fyne.Position, bool) {
+	return func(fyne.Position, fyne.Size) (fyne.Position, fyne.Position, bool) {
+		return tl, br, true
+	}
+}
+
+// TestHighlightDrawer_MoveDragFiresOnMovedWhenHitTestSelectedMatches covers
+// the gap a real drag on the page used to fall into: Draw mode off, a real
+// (non-stationary) drag, previously always a no-op (see
+// TestHighlightDrawer_DeliberateDragFiresOnDrawnOnlyWhenEnabled's own
+// Enabled=false case). Now, if HitTestSelected reports the drag started on
+// the selected highlight, it's a move instead — OnMoved fires with the raw
+// start/end points, not OnDrawn or OnTapped.
+func TestHighlightDrawer_MoveDragFiresOnMovedWhenHitTestSelectedMatches(t *testing.T) {
+	var moved, drawn, tapped bool
+	var gotStart, gotEnd fyne.Position
+
+	d := newTestHighlightDrawer()
+	d.Enabled = false
+	d.HitTestSelected = matchingHitTest(fyne.NewPos(40, 40), fyne.NewPos(60, 60))
+	d.OnMoved = func(start, end fyne.Position, _ fyne.Size) { moved, gotStart, gotEnd = true, start, end }
+	d.OnDrawn = func(fyne.Position, fyne.Position, fyne.Size) { drawn = true }
+	d.OnTapped = func(fyne.Position, fyne.Size) { tapped = true }
+
+	dragGesture(d, 50, 50, 40, 40)
+
+	if !moved {
+		t.Fatal("expected a deliberate drag starting on the selected highlight to fire OnMoved")
+	}
+	if drawn || tapped {
+		t.Errorf("expected only OnMoved to fire, got drawn=%v tapped=%v", drawn, tapped)
+	}
+	if gotStart != fyne.NewPos(50, 50) || gotEnd != fyne.NewPos(90, 90) {
+		t.Errorf("OnMoved start/end = %v/%v, want (50,50)/(90,90)", gotStart, gotEnd)
+	}
+}
+
+// TestHighlightDrawer_MoveDragDoesNothingWhenHitTestSelectedMisses confirms
+// the pre-Move behavior survives for a drag that does NOT start on the
+// selected highlight: still a no-op, exactly like before HitTestSelected
+// existed at all.
+func TestHighlightDrawer_MoveDragDoesNothingWhenHitTestSelectedMisses(t *testing.T) {
+	var moved, drawn, tapped bool
+
+	d := newTestHighlightDrawer()
+	d.Enabled = false
+	d.HitTestSelected = func(fyne.Position, fyne.Size) (fyne.Position, fyne.Position, bool) {
+		return fyne.Position{}, fyne.Position{}, false
+	}
+	d.OnMoved = func(fyne.Position, fyne.Position, fyne.Size) { moved = true }
+	d.OnDrawn = func(fyne.Position, fyne.Position, fyne.Size) { drawn = true }
+	d.OnTapped = func(fyne.Position, fyne.Size) { tapped = true }
+
+	dragGesture(d, 50, 50, 40, 40)
+
+	if moved || drawn || tapped {
+		t.Errorf("expected nothing to fire for a deliberate drag missing the selected highlight, got moved=%v drawn=%v tapped=%v", moved, drawn, tapped)
+	}
+}
+
+// TestHighlightDrawer_MoveNearStationaryFiresTappedNotMoved confirms a tiny
+// jittery click that happens to land on the selected highlight is still
+// treated as a plain re-select tap, not a (no-op, zero-distance) move —
+// matching TestHighlightDrawer_NearStationaryDragFiresTapped's own
+// reasoning, just with HitTestSelected now also matching.
+func TestHighlightDrawer_MoveNearStationaryFiresTappedNotMoved(t *testing.T) {
+	var moved, tapped bool
+
+	d := newTestHighlightDrawer()
+	d.Enabled = false
+	d.HitTestSelected = matchingHitTest(fyne.NewPos(40, 40), fyne.NewPos(60, 60))
+	d.OnMoved = func(fyne.Position, fyne.Position, fyne.Size) { moved = true }
+	d.OnTapped = func(fyne.Position, fyne.Size) { tapped = true }
+
+	dragGesture(d, 100, 100, minDragPts-1, minDragPts-1)
+
+	if !tapped {
+		t.Error("expected a near-stationary drag on the selected highlight to fire OnTapped")
+	}
+	if moved {
+		t.Error("expected a near-stationary drag NOT to fire OnMoved")
+	}
+}
+
+// TestHighlightDrawer_DrawModeTakesPriorityOverMove confirms Draw mode
+// (Enabled) and Move are mutually exclusive, as designed: with Enabled
+// true, HitTestSelected is never even consulted (see Dragged's own
+// `!d.Enabled` guard) — a deliberate drag always draws a new shape,
+// regardless of whether it happens to start on the currently-selected one.
+func TestHighlightDrawer_DrawModeTakesPriorityOverMove(t *testing.T) {
+	var moved, drawn bool
+	hitTestCalled := false
+
+	d := newTestHighlightDrawer()
+	d.Enabled = true
+	d.HitTestSelected = func(fyne.Position, fyne.Size) (fyne.Position, fyne.Position, bool) {
+		hitTestCalled = true
+		return fyne.NewPos(40, 40), fyne.NewPos(60, 60), true
+	}
+	d.OnMoved = func(fyne.Position, fyne.Position, fyne.Size) { moved = true }
+	d.OnDrawn = func(fyne.Position, fyne.Position, fyne.Size) { drawn = true }
+
+	dragGesture(d, 50, 50, 40, 40)
+
+	if hitTestCalled {
+		t.Error("expected HitTestSelected not to be consulted while Draw mode (Enabled) is on")
+	}
+	if !drawn || moved {
+		t.Errorf("expected OnDrawn only, got drawn=%v moved=%v", drawn, moved)
+	}
+}
+
+// TestHighlightDrawer_MoveGhostOverlayTracksDragDelta confirms the live
+// ghost overlay shown while moving is the selected highlight's own
+// starting bounds translated by however far the drag has moved so far —
+// not the draw-a-new-rectangle overlay's own "from start to current
+// point" shape, which would be wrong for a move (the ghost must keep the
+// shape's own original size, just slide it).
+func TestHighlightDrawer_MoveGhostOverlayTracksDragDelta(t *testing.T) {
+	d := newTestHighlightDrawer()
+	d.Enabled = false
+	d.HitTestSelected = matchingHitTest(fyne.NewPos(40, 40), fyne.NewPos(60, 60))
+
+	d.Dragged(&fyne.DragEvent{
+		PointEvent: fyne.PointEvent{Position: fyne.NewPos(50, 50)},
+		Dragged:    fyne.Delta{DX: 0, DY: 0},
+	})
+	d.Dragged(&fyne.DragEvent{
+		PointEvent: fyne.PointEvent{Position: fyne.NewPos(70, 65)},
+		Dragged:    fyne.Delta{DX: 20, DY: 15},
+	})
+
+	wantPos := fyne.NewPos(60, 55)  // original (40,40) + delta (20,15)
+	wantSize := fyne.NewSize(20, 20) // unchanged 20x20 original size
+	if d.overlay.Position() != wantPos {
+		t.Errorf("ghost overlay position = %v, want %v", d.overlay.Position(), wantPos)
+	}
+	if d.overlay.Size() != wantSize {
+		t.Errorf("ghost overlay size = %v, want %v (must stay the original shape's own size)", d.overlay.Size(), wantSize)
+	}
+
+	d.DragEnd()
+	if d.overlay.Size() != (fyne.Size{}) {
+		t.Errorf("expected the ghost overlay to be zero-sized again after DragEnd, got %v", d.overlay.Size())
+	}
+}
+
+// freehandGesture simulates a real multi-point freehand drag: an initial
+// Dragged call anchoring the start (same idiom dragGesture's own first
+// call uses), then one Dragged call per subsequent point in points, then
+// DragEnd — the sequence Fyne delivers for a real pen/mouse stroke with
+// more than two sampled positions, unlike dragGesture's single-step
+// rectangle drag.
+func freehandGesture(d *highlightDrawer, start fyne.Position, points ...fyne.Position) {
+	d.Dragged(&fyne.DragEvent{
+		PointEvent: fyne.PointEvent{Position: start},
+		Dragged:    fyne.Delta{DX: 0, DY: 0},
+	})
+	prev := start
+	for _, p := range points {
+		d.Dragged(&fyne.DragEvent{
+			PointEvent: fyne.PointEvent{Position: p},
+			Dragged:    fyne.Delta{DX: p.X - prev.X, DY: p.Y - prev.Y},
+		})
+		prev = p
+	}
+	d.DragEnd()
+}
+
+// TestHighlightDrawer_FreehandDragFiresOnFreehandDrawnWithAllPoints
+// confirms a real multi-point freehand stroke hands back every sampled
+// point, in order — not just start/end like OnDrawn/OnMoved — and that
+// OnDrawn/OnTapped don't also fire.
+func TestHighlightDrawer_FreehandDragFiresOnFreehandDrawnWithAllPoints(t *testing.T) {
+	var gotPoints []fyne.Position
+	drawn, tapped := false, false
+
+	d := newTestHighlightDrawer()
+	d.Enabled = true
+	d.FreehandMode = true
+	d.OnFreehandDrawn = func(points []fyne.Position, _ fyne.Size) { gotPoints = points }
+	d.OnDrawn = func(fyne.Position, fyne.Position, fyne.Size) { drawn = true }
+	d.OnTapped = func(fyne.Position, fyne.Size) { tapped = true }
+
+	start := fyne.NewPos(50, 50)
+	mid := fyne.NewPos(55, 60)
+	end := fyne.NewPos(70, 55)
+	freehandGesture(d, start, mid, end)
+
+	if drawn || tapped {
+		t.Errorf("expected only OnFreehandDrawn to fire, got drawn=%v tapped=%v", drawn, tapped)
+	}
+	want := []fyne.Position{start, mid, end}
+	if len(gotPoints) != len(want) {
+		t.Fatalf("got %d points, want %d: %v", len(gotPoints), len(want), gotPoints)
+	}
+	for i := range want {
+		if gotPoints[i] != want[i] {
+			t.Errorf("point %d = %v, want %v", i, gotPoints[i], want[i])
+		}
+	}
+}
+
+// TestHighlightDrawer_FreehandSingleAxisDragStillFires confirms a
+// deliberate single-axis stroke (e.g. a straight vertical pen line) fires
+// OnFreehandDrawn — unlike OnDrawn's own rectangle requirement
+// (TestHighlightDrawer_ThinSingleAxisDragFiresNeither), a single-axis
+// freehand stroke is a perfectly ordinary thing to draw.
+func TestHighlightDrawer_FreehandSingleAxisDragStillFires(t *testing.T) {
+	fired := false
+
+	d := newTestHighlightDrawer()
+	d.Enabled = true
+	d.FreehandMode = true
+	d.OnFreehandDrawn = func([]fyne.Position, fyne.Size) { fired = true }
+
+	freehandGesture(d, fyne.NewPos(50, 50), fyne.NewPos(50, 50+minDragPts+10))
+
+	if !fired {
+		t.Error("expected a deliberate single-axis freehand stroke to fire OnFreehandDrawn")
+	}
+}
+
+// TestHighlightDrawer_FreehandNearStationaryFiresTappedNotFreehand
+// confirms the usual near-stationary-drag-is-really-a-tap rule still
+// applies in FreehandMode.
+func TestHighlightDrawer_FreehandNearStationaryFiresTappedNotFreehand(t *testing.T) {
+	tapped, fired := false, false
+
+	d := newTestHighlightDrawer()
+	d.Enabled = true
+	d.FreehandMode = true
+	d.OnTapped = func(fyne.Position, fyne.Size) { tapped = true }
+	d.OnFreehandDrawn = func([]fyne.Position, fyne.Size) { fired = true }
+
+	dragGesture(d, 100, 100, minDragPts-1, minDragPts-1)
+
+	if !tapped {
+		t.Error("expected a near-stationary drag to fire OnTapped")
+	}
+	if fired {
+		t.Error("expected a near-stationary drag NOT to fire OnFreehandDrawn")
+	}
+}
+
+// TestHighlightDrawer_NonFreehandModeStillDrawsRectangle is a direct
+// regression guard: with FreehandMode left at its zero value (false), a
+// deliberate two-axis drag must still behave exactly as it always did —
+// OnDrawn, not OnFreehandDrawn.
+func TestHighlightDrawer_NonFreehandModeStillDrawsRectangle(t *testing.T) {
+	drawn, fired := false, false
+
+	d := newTestHighlightDrawer()
+	d.Enabled = true
+	d.OnDrawn = func(fyne.Position, fyne.Position, fyne.Size) { drawn = true }
+	d.OnFreehandDrawn = func([]fyne.Position, fyne.Size) { fired = true }
+
+	dragGesture(d, 50, 50, 40, 40)
+
+	if !drawn || fired {
+		t.Errorf("expected OnDrawn only when FreehandMode is off, got drawn=%v fired=%v", drawn, fired)
+	}
+}

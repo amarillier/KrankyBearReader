@@ -198,16 +198,16 @@ func TestHasPaintedColor_IncludesLineAlongsideQuadKinds(t *testing.T) {
 	for kind, want := range map[string]bool{
 		"Highlight": true, "Underline": true, "Strikeout": true, "Squiggly": true,
 		"Line": true, "Note": false,
-		// Square/Circle/Polygon/FreeText: this app's own authored shape
-		// kinds (see AddRectShape/AddPolygonShape/AddTextShape) — real
-		// user feedback found "Change Color" refused to work on a
-		// freshly-drawn shape at all, and it turned out to just be this
-		// gate never having been extended past the original markup/Line
-		// kinds. Stamp/PolyLine/Ink/Caret stay false: this app never
-		// authors those, and has no per-kind geometry to hand-paint a new
-		// color with even if it tried.
-		"Square": true, "Circle": true, "Polygon": true, "FreeText": true,
-		"Stamp": false, "PolyLine": false, "Ink": false, "Caret": false,
+		// Square/Circle/Polygon/FreeText/Ink/PolyLine: this app's own
+		// authored shape kinds (see AddRectShape/AddPolygonShape/
+		// AddTextShape/AddInkShape/AddPolyLineShape) — real user feedback
+		// found "Change Color" refused to work on a freshly-drawn shape at
+		// all, and it turned out to just be this gate never having been
+		// extended past the original markup/Line kinds. Stamp/Caret stay
+		// false: this app never authors those, and has no per-kind
+		// geometry to hand-paint a new color with even if it tried.
+		"Square": true, "Circle": true, "Polygon": true, "FreeText": true, "Ink": true, "PolyLine": true,
+		"Stamp": false, "Caret": false,
 	} {
 		if got := hasPaintedColor(kind); got != want {
 			t.Errorf("hasPaintedColor(%q) = %v, want %v", kind, got, want)
@@ -226,7 +226,28 @@ func TestHasPaintedColor_IncludesLineAlongsideQuadKinds(t *testing.T) {
 // itself correctly paints nothing for an empty vertex list, so
 // paintHighlights' own Polygon case must fall back to a plain Rect
 // outline rather than calling drawPolygonOutline blindly.
-func TestPaintHighlights_PolygonWithoutVerticesFallsBackToRectOutline(t *testing.T) {
+// TestPaintHighlights_PolygonWithoutVerticesSkipsHandPaint supersedes an
+// earlier version of this test (same name minus "Skips...", which
+// asserted the OPPOSITE: that a Rect-outline fallback got painted).
+// Reverted after real user testing found that fallback actively
+// misleading rather than merely approximate: recoloring or reweighting an
+// already-saved Ink/PolyLine stroke made the real freehand line visibly
+// "disappear" into a plain box the instant the change was made, even
+// though nothing was actually lost (the real Save always applied the new
+// value correctly regardless — see applyPendingHighlightEdits' own
+// in-place fallback). Now, when newAnnotationForShape can't produce a
+// correct replacement (Vertices-less Polygon/Ink/PolyLine), needsHandPaint
+// stays false entirely — paintHighlights paints NOTHING for the highlight
+// itself, trusting buildNormalizedDoc to have correspondingly left the old
+// annotation in the scratch copy for MuPDF to render as-is (stale value,
+// correct shape) rather than deleting it with nothing accurate to put
+// back. This test only exercises paintHighlights in isolation (no real
+// annotation on disk for a synthetic Highlight constructed by hand), so
+// "nothing painted" here is the whole, correct story — the "MuPDF still
+// shows the real shape" half is covered by
+// TestSaveHighlights_RecolorForeignPolygonDoesNotDeleteIt-style real-file
+// tests and highlightsPanel's own notifyIfRenderIsDeferred notice.
+func TestPaintHighlights_PolygonWithoutVerticesSkipsHandPaint(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.pdf")
 	writeMinimalPDF(t, path)
@@ -239,24 +260,20 @@ func TestPaintHighlights_PolygonWithoutVerticesFallsBackToRectOutline(t *testing
 	h := &Highlight{
 		Page: 1, Kind: "Polygon", ObjNr: 42, // already-saved -- not ObjNr == 0
 		Rect: [4]float64{20, 20, 80, 80}, Color: [3]float64{0, 1, 0},
-		origColor: [3]float64{1, 0, 0}, // diverged from origColor -> colorChanged -> needsHandPaint
+		origColor: [3]float64{1, 0, 0}, // diverged from origColor -> colorChanged
 	}
 	doc.Highlights = []*Highlight{h}
 
 	img := image.NewRGBA(image.Rect(0, 0, 200, 200))
 	doc.paintHighlights(img, 1, 72) // scale = 1.0 at 72 DPI
 
-	painted := false
 	b := img.Bounds()
 	for y := b.Min.Y; y < b.Max.Y; y++ {
 		for x := b.Min.X; x < b.Max.X; x++ {
 			if img.RGBAAt(x, y).A > 0 {
-				painted = true
+				t.Fatalf("expected nothing hand-painted for a colorChanged Polygon with no Vertices (can't produce a correct replacement), found a painted pixel at (%d,%d)", x, y)
 			}
 		}
-	}
-	if !painted {
-		t.Errorf("expected a Rect-outline fallback painted for a Polygon with no Vertices, found nothing")
 	}
 }
 

@@ -82,8 +82,9 @@ type view struct {
 	zoomLevel      float64                       // -1 Fit Width, -2 Fit Page, else a literal zoom factor
 	continuous     bool
 	panelMode      PanelMode
-	drawKind       string     // "" = off, else "Highlight"/"Square"/"Circle"/"Line" — see setDrawKind/handleHighlightDrawn
+	drawKind       string     // "" = off, else "Highlight"/"Underline"/"Strikeout"/"Squiggly"/"Square"/"Circle"/"Line"/... — see setDrawKind/handleHighlightDrawn
 	highlightColor [3]float64 // color the next drawn shape uses — see colorSwatchBtn
+	lineWidthPt    float64    // stroke/border width (PDF points) the next drawn shape uses — see lineWidthSelect; meaningless for Highlight/Underline/Strikeout/Squiggly/Text/Speech Bubble (see hasLineWidth)
 	colorSwatchBtn *colorSwatch
 
 	currentImage  *canvas.Image
@@ -130,7 +131,8 @@ func NewView(win fyne.Window, doc *Document, initialPage int, onPageChanged func
 		onPageChanged:  onPageChanged,
 		onRetargeted:   onRetargeted,
 		zoomLevel:      -1, // default to Fit Width, a sensible first look at any page size
-		highlightColor: defaultHighlightColor,
+		highlightColor: loadDefaultHighlightColor(),
+		lineWidthPt:    loadDefaultLineWidthPt(),
 	}
 
 	content := v.build()
@@ -245,6 +247,15 @@ func (v *view) build() fyne.CanvasObject {
 	v.currentDrawer.OnTappedSecondary = func(pos fyne.Position, size fyne.Size, absPos fyne.Position) {
 		v.handleHighlightSecondaryTapped(v.currentPage, pos, size, absPos)
 	}
+	v.currentDrawer.HitTestSelected = func(pos fyne.Position, size fyne.Size) (fyne.Position, fyne.Position, bool) {
+		return v.handleHighlightMoveHitTest(v.currentPage, pos, size)
+	}
+	v.currentDrawer.OnMoved = func(start, end fyne.Position, size fyne.Size) {
+		v.handleHighlightMoved(v.currentPage, start, end, size)
+	}
+	v.currentDrawer.OnFreehandDrawn = func(points []fyne.Position, size fyne.Size) {
+		v.handleFreehandDrawn(v.currentPage, points, size)
+	}
 	v.imageScroll = container.NewScroll(v.currentDrawer)
 	v.imageScroll.OnScrolled = func(_ fyne.Position) {
 		if v.continuous {
@@ -315,19 +326,28 @@ func (v *view) buildToolbar() fyne.CanvasObject {
 	// whichever kind is selected here (see handleHighlightDrawn) — a
 	// dropdown rather than one checkbox per kind, matching the same
 	// "don't reserve space for every option all the time" reasoning as
-	// panelSelect below. Highlight/Square/Circle/Star/Hexagon are a plain
-	// rectangle drag (go-fitz has no text bounding-box API for a real
-	// text-snapped selection like Preview/Acrobat's Highlight tool, so
-	// this is a free rectangle instead; Star/Hexagon generate their own
-	// vertices parametrically from that same rectangle — see
-	// starVertices/hexagonVertices, since PDF has no dedicated subtype
-	// for either, both are authored as a generic Polygon); Line draws an
-	// arrow from the drag's start toward its end (see
-	// defaultArrowEndStyle); Text/Speech Bubble prompt for the caption
-	// text before creating anything (see promptForShapeText). "Off" by
-	// default so a plain click-drag (which did nothing before Draw
-	// Highlight existed) still does nothing unless the user deliberately
-	// picks a shape.
+	// panelSelect below. Highlight/Underline/Strikeout/Squiggly/Square/
+	// Circle/Star/Hexagon are a plain rectangle drag (go-fitz has no text
+	// bounding-box API for a real text-snapped selection like Preview/
+	// Acrobat's Highlight tool, so this is a free rectangle instead;
+	// Underline/Strikeout/Squiggly use the exact same quad as Highlight,
+	// just painted/authored as a different markup kind — see
+	// AddMarkupShape; Star/Hexagon generate their own vertices
+	// parametrically from that same rectangle — see starVertices/
+	// hexagonVertices, since PDF has no dedicated subtype for either, both
+	// are authored as a generic Polygon); Line draws an arrow from the
+	// drag's start toward its end (see defaultArrowEndStyle); Text/Speech
+	// Bubble prompt for the caption text before creating anything (see
+	// promptForShapeText). Ink and PolyLine are the freehand exceptions —
+	// every sampled point along the drag becomes the stroke, not just its
+	// start/end (see highlightDrawer's own FreehandMode/OnFreehandDrawn
+	// and handleFreehandDrawn) — both use the identical capture, just
+	// saved under a different PDF subtype (/Ink vs /PolyLine); a real
+	// click-vertex-then-finish PolyLine tool is a bigger, separate effort
+	// (see ReleaseNotes' Future ideas), not what this is. "Off" by default
+	// so a plain click-drag (which did nothing before Draw Highlight
+	// existed) still does nothing unless the user deliberately picks a
+	// shape.
 	//
 	// Every option is prefixed "Draw: " — found via real hands-on testing
 	// that a bare "Off" (this control's own closed-state label, same as
@@ -339,8 +359,9 @@ func (v *view) buildToolbar() fyne.CanvasObject {
 	// needs its own distinct label, so the fix is prefixing all of them
 	// uniformly rather than special-casing just the closed state.
 	drawOptions := []string{
-		"Draw: Off", "Draw: Highlight", "Draw: Square", "Draw: Circle", "Draw: Line",
-		"Draw: Star", "Draw: Hexagon", "Draw: Text", "Draw: Speech Bubble",
+		"Draw: Off", "Draw: Highlight", "Draw: Underline", "Draw: Strikeout", "Draw: Squiggly",
+		"Draw: Square", "Draw: Circle", "Draw: Line",
+		"Draw: Star", "Draw: Hexagon", "Draw: Text", "Draw: Speech Bubble", "Draw: Ink", "Draw: PolyLine",
 	}
 	drawSelect := widget.NewSelect(drawOptions, func(s string) {
 		kind := strings.TrimPrefix(s, "Draw: ")
@@ -361,8 +382,25 @@ func (v *view) buildToolbar() fyne.CanvasObject {
 		showHighlightColorPicker(v.win, v.highlightColor, func(rgb [3]float64) {
 			v.highlightColor = rgb
 			v.colorSwatchBtn.SetColor(rgbToFyneColor(rgb))
+			saveDefaultHighlightColor(rgb)
 		})
 	}
+
+	// The next new shape's own stroke/border width — meaningless for
+	// Highlight/Underline/Strikeout/Squiggly/Text/Speech Bubble (see
+	// hasLineWidth), but always shown rather than only while a kind that
+	// uses it is selected: simpler than wiring this control's own
+	// visibility to drawSelect's current choice, and picking a width while
+	// it happens not to apply yet is harmless (it's just not used until a
+	// kind that does need it gets drawn).
+	lineWidthSelect := widget.NewSelect(lineWeightOptions(), func(s string) {
+		if w, ok := parseLineWeightLabel(s); ok {
+			v.lineWidthPt = w
+			saveDefaultLineWidthPt(w)
+		}
+	})
+	lineWidthSelect.Selected = lineWeightLabel(v.lineWidthPt)
+	lineWidthSelect.Refresh()
 
 	// A single dropdown rather than a persistent row of buttons: picking the
 	// closed option is what actually closes the split (mainContent.Objects
@@ -396,7 +434,7 @@ func (v *view) buildToolbar() fyne.CanvasObject {
 	v.panelSelectRef = panelSelect
 
 	nav := container.NewHBox(panelSelect, firstBtn, prevBtn, v.pageEntry, v.totalLabel, nextBtn, lastBtn)
-	right := container.NewHBox(v.zoomSelect, continuousCheck, drawSelect, v.colorSwatchBtn)
+	right := container.NewHBox(v.zoomSelect, continuousCheck, drawSelect, lineWidthSelect, v.colorSwatchBtn)
 	return container.NewBorder(nil, nil, nav, right)
 }
 

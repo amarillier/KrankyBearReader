@@ -198,6 +198,18 @@ func (bp *bookmarkPanel) editSelected() {
 }
 
 func (bp *bookmarkPanel) showAddDialog(toTOC bool) {
+	bp.showAddDialogAt(toTOC, bp.v.currentPage, bp.v.scrollFraction())
+}
+
+// showAddDialogAt is showAddDialog's parameterized core — used both by the
+// panel's own "Add Bookmark"/"Add TOC Entry" button (always the current
+// page/scroll position, via showAddDialog above) and by the page's own
+// right-click "Add Bookmark Here"/"Add TOC Entry Here" context-menu
+// actions (view_render.go's showEmptySpaceContextMenu), which know
+// exactly which page and vertical fraction were actually clicked —
+// possibly a different page/position than whatever's currently scrolled
+// into view.
+func (bp *bookmarkPanel) showAddDialogAt(toTOC bool, pageHint int, frac float32) {
 	kind, dlgTitle := "Bookmark", "Add Bookmark"
 	if toTOC {
 		kind, dlgTitle = "TOC entry", "Add to Table of Contents"
@@ -207,7 +219,7 @@ func (bp *bookmarkPanel) showAddDialog(toTOC bool) {
 	titleEntry.SetPlaceHolder(kind + " title")
 
 	pageEntry := widget.NewEntry()
-	pageEntry.SetText(strconv.Itoa(bp.v.currentPage))
+	pageEntry.SetText(strconv.Itoa(pageHint))
 	pageEntry.SetPlaceHolder("Page number")
 
 	form := container.NewVBox(widget.NewForm(
@@ -215,14 +227,13 @@ func (bp *bookmarkPanel) showAddDialog(toTOC bool) {
 		widget.NewFormItem("Page:", pageEntry),
 	))
 
-	currentFrac := bp.v.scrollFraction()
 	var typeRadio *widget.RadioGroup
 	if !toTOC {
 		typeRadio = widget.NewRadioGroup([]string{
 			"Page bookmark (jump to top of page)",
 			"Region bookmark (jump to current position)",
 		}, nil)
-		if currentFrac > 0.01 {
+		if frac > 0.01 {
 			typeRadio.SetSelected("Region bookmark (jump to current position)")
 		} else {
 			typeRadio.SetSelected("Page bookmark (jump to top of page)")
@@ -246,7 +257,7 @@ func (bp *bookmarkPanel) showAddDialog(toTOC bool) {
 		}
 		var yOffset float32
 		if typeRadio != nil && typeRadio.Selected == "Region bookmark (jump to current position)" {
-			yOffset = currentFrac
+			yOffset = frac
 		}
 
 		bp.v.doc.Bookmarks.AddBookmark(title, pageNo, yOffset, !toTOC)

@@ -1,7 +1,6 @@
 package pdf
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -12,6 +11,7 @@ import (
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
+	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
 )
 
 // bookmarkTitlePrefix marks an outline entry as a user "bookmark" (vs the document's own
@@ -50,22 +50,88 @@ func (bm *BookmarkManager) LoadBookmarks(pdfPath string) error {
 	bm.pdfPath = pdfPath
 	bm.bookmarks = make([]*Bookmark, 0)
 
-	conf := model.NewDefaultConfiguration()
-
-	f, err := os.Open(pdfPath)
+	ctx, err := api.ReadContextFile(pdfPath)
 	if err != nil {
 		return fmt.Errorf("failed to open PDF: %w", err)
 	}
-	defer f.Close()
 
-	bookmarkList, err := api.Bookmarks(f, conf)
+	bookmarkList, err := pdfcpu.Bookmarks(ctx)
 	if err != nil {
 		log.Printf("[WARN] no bookmarks found or error reading bookmarks: %v", err)
 		return nil
 	}
 
 	bm.bookmarks = convertPdfcpuBookmarks(bookmarkList)
+	populateRegionOffsets(ctx.XRefTable, bm.bookmarks)
 	return nil
+}
+
+// populateRegionOffsets fills in YOffset for every bookmark (recursively)
+// whose own named destination is a real /XYZ array rather than pdfcpu's
+// always-whole-page-/Fit default — see writeRegionDestinations' own doc
+// comment for why pdfcpu's Bookmark/AddBookmarks never writes one itself,
+// and regionYOffsetForKey for how the position is recovered. A bookmark
+// with no such destination (every page bookmark, every TOC entry from this
+// app, and any entry whose destination this app never touched) is left at
+// its zero-value YOffset, same as before this existed.
+func populateRegionOffsets(xRefTable *model.XRefTable, bookmarks []*Bookmark) {
+	for _, b := range bookmarks {
+		key := b.Title
+		if b.IsUserAdded {
+			key = bookmarkTitlePrefix + key
+		}
+		b.YOffset = regionYOffsetForKey(xRefTable, key, b.PageNo)
+		if len(b.Children) > 0 {
+			populateRegionOffsets(xRefTable, b.Children)
+		}
+	}
+}
+
+// regionYOffsetForKey recovers the scroll-position fraction (0..1, top to
+// bottom) a region bookmark's own named destination was given by
+// writeRegionDestinations, by reading back the real /XYZ array's own "top"
+// coordinate and the target page's actual MediaBox height. Returns 0 (page
+// bookmark, "jump to top") for anything that isn't exactly this shape — no
+// destination at all, a /Fit or other non-/XYZ destination, a malformed
+// array, or a page whose MediaBox can't be read — the same degrade-to-
+// page-bookmark fallback this feature had before a position could be
+// written at all.
+//
+// Does not account for the target page's own /Rotate: the position is
+// computed against the page's raw, pre-rotation MediaBox, which matches
+// how writeRegionDestinations writes it, but a rotated page's own rendered
+// (and so scrolled) height differs from that raw MediaBox height by more
+// than a simple fraction — a known, narrow gap, not yet hit on a real
+// rotated test file.
+func regionYOffsetForKey(xRefTable *model.XRefTable, key string, pageNo int) float32 {
+	arr, err := xRefTable.DereferenceDestArray(key)
+	if err != nil || len(arr) < 4 {
+		return 0
+	}
+	name, ok := arr[1].(types.Name)
+	if !ok || name.Value() != "XYZ" {
+		return 0
+	}
+	top, err := xRefTable.DereferenceNumber(arr[3])
+	if err != nil {
+		return 0
+	}
+	_, _, pAttrs, err := xRefTable.PageDict(pageNo, false)
+	if err != nil || pAttrs == nil || pAttrs.MediaBox == nil {
+		return 0
+	}
+	h := pAttrs.MediaBox.Height()
+	if h <= 0 {
+		return 0
+	}
+	frac := 1 - (top-pAttrs.MediaBox.LL.Y)/h
+	if frac < 0 {
+		frac = 0
+	}
+	if frac > 1 {
+		frac = 1
+	}
+	return float32(frac)
 }
 
 func convertPdfcpuBookmarks(pdfcpuBookmarks []pdfcpu.Bookmark) []*Bookmark {
@@ -178,31 +244,130 @@ func (bm *BookmarkManager) HasBookmarks() bool {
 
 // SaveBookmarks writes the current entries into the PDF's outline at
 // outputPath. With zero entries it strips the outline entirely.
+//
+// Reads d.pdfPath into a *model.Context itself (rather than the simpler
+// api.AddBookmarksFile/RemoveBookmarksFile one-shot helpers this used
+// before) so that, after pdfcpu.AddBookmarks builds the outline tree, this
+// can still patch in a real position for every region bookmark via
+// writeRegionDestinations — pdfcpu's own API has no way to ask for
+// anything but a whole-page destination up front. Mirrors the same
+// read-ctx/mutate/write-atomically shape SaveHighlights already uses for
+// its own pdfcpu API gaps.
 func (bm *BookmarkManager) SaveBookmarks(outputPath string) error {
 	if bm.pdfPath == "" {
 		return fmt.Errorf("no PDF loaded")
 	}
 
-	conf := model.NewDefaultConfiguration()
+	ctx, err := api.ReadContextFile(bm.pdfPath)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", bm.pdfPath, err)
+	}
 
 	if len(bm.bookmarks) == 0 {
-		err := api.RemoveBookmarksFile(bm.pdfPath, outputPath, conf)
-		if errors.Is(err, api.ErrNoOutlines) {
+		removed, err := pdfcpu.RemoveBookmarks(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to clear bookmarks: %w", err)
+		}
+		if !removed {
 			if outputPath != "" && outputPath != bm.pdfPath {
 				return copyFile(bm.pdfPath, outputPath)
 			}
 			return nil
 		}
-		if err != nil {
-			return fmt.Errorf("failed to clear bookmarks: %w", err)
-		}
-		return nil
+		return writeContextAtomically(ctx, outputPath)
 	}
 
 	pdfcpuBookmarks := bm.convertToPdfcpuFormat()
-	if err := api.AddBookmarksFile(bm.pdfPath, outputPath, pdfcpuBookmarks, true, conf); err != nil {
+	if err := pdfcpu.AddBookmarks(ctx, pdfcpuBookmarks, true); err != nil {
 		return fmt.Errorf("failed to save bookmarks: %w", err)
 	}
+
+	writeRegionDestinations(ctx, bm.bookmarks)
+
+	return writeContextAtomically(ctx, outputPath)
+}
+
+// writeRegionDestinations overwrites each region bookmark's own named
+// destination — just created by pdfcpu.AddBookmarks as a whole-page /Fit
+// array (bmDict, pdfcpu's own bookmark.go, always writes exactly
+// [pageRef /Fit], with no way to ask for anything else) — with a real
+// /XYZ array carrying that bookmark's exact scroll position. pdfcpu's own
+// Bookmark/AddBookmarks has no concept of a position within a page at
+// all, so this is the same raw-dict/raw-object mutation escape hatch
+// annotations.go's highlightGeometry-adjacent code already uses for
+// similar pdfcpu API gaps (see CLAUDE.md) — just on an array object
+// instead of a dict.
+//
+// Looks each bookmark's destination up by the exact key pdfcpu's own
+// bmDict registered it under in ctx.Names["Dests"] (the title string
+// actually written to the PDF, bookmarkTitlePrefix included for a
+// user-added entry) rather than trying to walk the outline tree pdfcpu
+// just built — pdfcpu's own createOutlineItemDictDepth doesn't hand back
+// per-item object numbers, but every title it writes is already a unique
+// key in the Dests name tree (pdfcpu itself errors out on AddBookmarks if
+// two entries ever collide, independent of this feature), which is all a
+// name-tree lookup needs.
+func writeRegionDestinations(ctx *model.Context, bookmarks []*Bookmark) {
+	for _, b := range bookmarks {
+		if b.YOffset > 0 {
+			key := b.Title
+			if b.IsUserAdded {
+				key = bookmarkTitlePrefix + key
+			}
+			if err := setRegionDestination(ctx, key, b.PageNo, b.YOffset); err != nil {
+				log.Printf("[WARN] bookmark %q: writing region position: %v", b.Title, err)
+			}
+		}
+		if len(b.Children) > 0 {
+			writeRegionDestinations(ctx, b.Children)
+		}
+	}
+}
+
+// setRegionDestination replaces the array object a bookmark's named
+// destination (in ctx.Names["Dests"], added by pdfcpu's own bmDict) points
+// to with a real /XYZ destination: [page /XYZ null top null] — left and
+// zoom null ("leave as the viewer's current value", a real PDF null per
+// spec, not merely absent) since this app only ever controls vertical
+// scroll position, never horizontal offset or zoom level. top is computed
+// from yOffset (0..1, top to bottom) against the target page's own raw
+// MediaBox height — see regionYOffsetForKey's doc comment for the
+// (deliberately accepted, not yet hit in practice) rotated-page caveat
+// that comes with using the raw MediaBox rather than a rotation-aware
+// size.
+func setRegionDestination(ctx *model.Context, key string, pageNo int, yOffset float32) error {
+	dNames := ctx.Names["Dests"]
+	if dNames == nil {
+		return fmt.Errorf("no destinations name tree")
+	}
+	obj, ok := dNames.Value(key)
+	if !ok {
+		return fmt.Errorf("no named destination for %q", key)
+	}
+	ref, ok := obj.(types.IndirectRef)
+	if !ok {
+		return fmt.Errorf("named destination for %q is not an indirect reference", key)
+	}
+	entry, ok := ctx.XRefTable.FindTableEntryLight(ref.ObjectNumber.Value())
+	if !ok {
+		return fmt.Errorf("named destination object %d not found", ref.ObjectNumber.Value())
+	}
+
+	pageIndRef, err := ctx.XRefTable.PageDictIndRef(pageNo)
+	if err != nil {
+		return fmt.Errorf("page %d: %w", pageNo, err)
+	}
+
+	_, _, pAttrs, err := ctx.XRefTable.PageDict(pageNo, false)
+	if err != nil {
+		return fmt.Errorf("page %d: %w", pageNo, err)
+	}
+	if pAttrs == nil || pAttrs.MediaBox == nil {
+		return fmt.Errorf("page %d: no media box", pageNo)
+	}
+
+	top := pAttrs.MediaBox.LL.Y + pAttrs.MediaBox.Height()*float64(1-yOffset)
+	entry.Object = types.Array{*pageIndRef, types.Name("XYZ"), nil, types.Float(top), nil}
 	return nil
 }
 

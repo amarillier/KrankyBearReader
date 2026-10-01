@@ -90,15 +90,18 @@ type Highlight struct {
 	Rect [4]float64
 
 	// Vertices is populated for a freshly-drawn (ObjNr == 0), not-yet-
-	// saved Kind == "Polygon" only — Star or Hexagon, see
-	// AddPolygonShape/view_render.go's starVertices/hexagonVertices. PDF
-	// user-space points, one [2]float64 per vertex, in drawing order; the
-	// shape closes back to the first vertex. Never populated when reading
-	// an existing Polygon back from a real file (pdfcpu's own read path
-	// doesn't carry /Vertices back any more than it does /QuadPoints or
-	// /L — see highlightGeometry/lineGeometry's own doc comments for the
-	// same gap) — an already-saved Polygon only ever needs Rect, since
-	// MuPDF's own rendering already paints it correctly.
+	// saved Kind == "Polygon" or "Ink" only — Star/Hexagon (see
+	// AddPolygonShape/view_render.go's starVertices/hexagonVertices) or a
+	// freehand stroke (see AddInkShape). PDF user-space points, one
+	// [2]float64 per vertex, in drawing order; a Polygon's shape closes
+	// back to the first vertex, an Ink stroke's does not (see
+	// drawPolygonOutline/drawPolylineOutline). Never populated when
+	// reading an existing Polygon or Ink annotation back from a real file
+	// (pdfcpu's own read path doesn't carry /Vertices or /InkList back any
+	// more than it does /QuadPoints or /L — see highlightGeometry/
+	// lineGeometry's own doc comments for the same gap) — an already-saved
+	// one only ever needs Rect, since MuPDF's own rendering already paints
+	// it correctly.
 	Vertices [][2]float64
 
 	// CalloutTip is populated for a freshly-drawn (ObjNr == 0), not-yet-
@@ -124,6 +127,41 @@ type Highlight struct {
 	// Contents or Color had actually changed.
 	origContents string
 	origColor    [3]float64
+
+	// geometryMoved is true once MoveHighlight has repositioned this
+	// highlight since it was loaded (or since the last save, which resets
+	// it via a fresh LoadHighlights — see SaveHighlights). Unlike
+	// origContents/origColor, this isn't a snapshot compared against the
+	// current value: a drag gesture essentially never lands back on the
+	// exact original floating-point position, so "did it actually change"
+	// is answered by "did MoveHighlight ever run" rather than a deep-equal
+	// check across Quads/Line/Rect/Vertices/CalloutTip. See
+	// highlightDictChanges, which reports this alongside contentsChanged/
+	// colorChanged for SaveHighlights/buildNormalizedDoc's own delete-and-
+	// recreate handling.
+	geometryMoved bool
+
+	// LineWidth is the stroke/border width, in PDF user-space points, for
+	// a kind hasLineWidth reports true for (Square/Circle/Polygon/Ink/
+	// PolyLine's /BS /W, or Line's own /BS /W) — meaningless (Go zero
+	// value) for any other kind, the same "only meaningful for a gated
+	// subset" convention Color already uses (see hasPaintedColor).
+	// Defaults to defaultShapeBorderWidthPt/defaultLineWidthPt when a real
+	// annotation's own /BS is absent or malformed (see parseBorderWidth),
+	// matching the PDF spec's own default border width. Deliberately NOT
+	// read or used for FreeText even though it's otherwise an
+	// authoredGenericKinds member: confirmed empirically (see
+	// newAnnotationForShape's own "Tried and reverted" history in
+	// CLAUDE.md) that MuPDF's default-appearance synthesis for a FreeText
+	// with no baked /AP draws its border unconditionally, ignoring /BS's
+	// width regardless of value — so a configurable LineWidth would have
+	// no visible effect on an already-saved FreeText's real rendering,
+	// while this app's own hand-paint preview (drawFreeTextPreview) could
+	// easily end up honoring it anyway if this field were wired in
+	// carelessly, creating exactly the "looks right before Save, looks
+	// different after" mismatch CLAUDE.md already warns about elsewhere.
+	LineWidth     float64
+	origLineWidth float64
 }
 
 // highlightKinds are the annotation types worth listing, and their display
@@ -180,17 +218,19 @@ var paintableMarkupKinds = map[string]bool{
 }
 
 // authoredGenericKinds are the genericRectKinds members this app can
-// itself author (see AddRectShape/AddPolygonShape/AddTextShape) — as
-// opposed to Stamp/PolyLine/Ink/Caret, which it only ever reads back from
-// another app and has no per-kind geometry to hand-paint at all. Shared
-// between hasPaintedColor (below) and anywhere else that needs to
-// distinguish "a shape kind this app draws" from "a shape kind this app
-// only lists/deletes."
+// itself author (see AddRectShape/AddPolygonShape/AddTextShape/
+// AddInkShape) — as opposed to Stamp/PolyLine/Caret, which it only ever
+// reads back from another app and has no per-kind geometry to hand-paint
+// at all. Shared between hasPaintedColor (below) and anywhere else that
+// needs to distinguish "a shape kind this app draws" from "a shape kind
+// this app only lists/deletes."
 var authoredGenericKinds = map[string]bool{
 	"Square":   true,
 	"Circle":   true,
 	"Polygon":  true,
 	"FreeText": true,
+	"Ink":      true,
+	"PolyLine": true,
 }
 
 // hasPaintedColor reports whether kind's Color field means anything —
@@ -213,6 +253,19 @@ var authoredGenericKinds = map[string]bool{
 // falls back to a plain Rect outline rather than painting nothing).
 func hasPaintedColor(kind string) bool {
 	return paintableMarkupKinds[kind] || kind == "Line" || authoredGenericKinds[kind]
+}
+
+// hasLineWidth reports whether kind's LineWidth field means a real,
+// visibly-adjustable stroke width — Square/Circle/Polygon/Ink/PolyLine's
+// own /BS /W, or Line's own /BS /W. Deliberately narrower than
+// hasPaintedColor: excludes FreeText (see Highlight.LineWidth's own doc
+// comment for why a configurable border width would have no visible
+// effect on it) and every paintableMarkupKinds member (Highlight/
+// Underline/Strikeout/Squiggly draw their own mark as a fraction of the
+// quad's height, not a fixed-width /BS stroke — there's nothing for a
+// line-weight control to adjust on one of these at all).
+func hasLineWidth(kind string) bool {
+	return kind == "Line" || (authoredGenericKinds[kind] && kind != "FreeText")
 }
 
 // defaultHighlightColor is standard highlighter yellow, used when a PDF's
@@ -271,11 +324,11 @@ func flattenHighlights(xRefTable *model.XRefTable, pgAnnots map[int]model.PgAnno
 				case paintableMarkupKinds[label]:
 					h.Quads, h.Color = highlightGeometry(xRefTable, objNr)
 				case label == "Line":
-					h.Line, h.LineEndStyle, h.Color = lineGeometry(xRefTable, objNr)
+					h.Line, h.LineEndStyle, h.Color, h.LineWidth = lineGeometry(xRefTable, objNr)
 				case genericRectKinds[label]:
-					h.Rect = annotationRectPt(xRefTable, objNr)
+					h.Rect, h.Color, h.LineWidth = annotationRectPt(xRefTable, objNr)
 				}
-				h.origContents, h.origColor = h.Contents, h.Color
+				h.origContents, h.origColor, h.origLineWidth = h.Contents, h.Color, h.LineWidth
 				out = append(out, h)
 			}
 		}
@@ -285,29 +338,48 @@ func flattenHighlights(xRefTable *model.XRefTable, pgAnnots map[int]model.PgAnno
 }
 
 // annotationRectPt re-dereferences a genericRectKinds annotation's own raw
-// PDF dict to read its /Rect directly, the same re-dereference-by-objNr
-// technique highlightGeometry/lineGeometry use for /QuadPoints and /L —
-// pdfcpu's own read path doesn't populate a generic annotation's Rect
-// field back from an existing PDF either. Returns the zero [4]float64 if
-// objNr is invalid, the dict can't be read, or /Rect is malformed — the
-// same "list without painting" fallback as the other geometry readers;
-// HighlightAt and paintHighlights both treat a zero Rect as "nothing to
-// hit-test or outline."
-func annotationRectPt(xRefTable *model.XRefTable, objNr int) [4]float64 {
+// PDF dict to read its /Rect, /C, and /BS /W directly, the same re-
+// dereference-by-objNr technique highlightGeometry/lineGeometry use for
+// /QuadPoints and /L — pdfcpu's own read path doesn't populate a generic
+// annotation's Rect field back from an existing PDF either. Returns the
+// zero [4]float64 for Rect if objNr is invalid, the dict can't be read, or
+// /Rect is malformed — the same "list without painting" fallback as the
+// other geometry readers; HighlightAt and paintHighlights both treat a
+// zero Rect as "nothing to hit-test or outline." Color and LineWidth are
+// only ever actually USED by hasPaintedColor/hasLineWidth's own
+// authoredGenericKinds subset — reading them unconditionally for every
+// genericRectKinds member anyway (Stamp/PolyLine/Caret included) is
+// harmless, since nothing downstream treats their values as meaningful
+// regardless of what they hold (see hasPaintedColor/hasLineWidth's own
+// gates).
+//
+// Color was found necessary, not just a nice-to-have: before this, it was
+// never populated for ANY genericRectKinds member at all, so recoloring
+// one of this app's own authored shapes (Square/Circle/Polygon/FreeText/
+// Ink), saving, and reloading fresh silently reverted Highlight.Color to
+// black in memory — the real file's own /C, and so MuPDF's rendering,
+// were always correct, but this app's own in-memory state (e.g. what the
+// Highlights panel would show as a shape's "current" color right after
+// reopening) wasn't. Caught by TestSaveHighlights_InkRoundTrips, the
+// first test in this file to actually check a genericRectKinds member's
+// Color after a real save+reload rather than just its Rect.
+func annotationRectPt(xRefTable *model.XRefTable, objNr int) ([4]float64, [3]float64, float64) {
 	if objNr <= 0 {
-		return [4]float64{}
+		return [4]float64{}, defaultHighlightColor, defaultShapeBorderWidthPt
 	}
 	d, err := xRefTable.DereferenceDict(*types.NewIndirectRef(objNr, 0))
 	if err != nil || d == nil {
-		return [4]float64{}
+		return [4]float64{}, defaultHighlightColor, defaultShapeBorderWidthPt
 	}
+	col := parseColor(xRefTable, d.ArrayEntry("C"))
+	lineWidth := parseBorderWidth(xRefTable, d, defaultShapeBorderWidthPt)
 	rect := parseRectPt(xRefTable, d.ArrayEntry("Rect"))
 	if rect == nil {
-		return [4]float64{}
+		return [4]float64{}, col, lineWidth
 	}
 	minX, maxX := min(rect[0], rect[2]), max(rect[0], rect[2])
 	minY, maxY := min(rect[1], rect[3]), max(rect[1], rect[3])
-	return [4]float64{minX, minY, maxX, maxY}
+	return [4]float64{minX, minY, maxX, maxY}, col, lineWidth
 }
 
 // highlightGeometry re-dereferences a highlight annotation's own raw PDF dict
@@ -335,14 +407,14 @@ func highlightGeometry(xRefTable *model.XRefTable, objNr int) ([][8]float64, [3]
 // end), and /C directly: pdfcpu's own read path never populates
 // LineAnnotation's own fields back from an existing PDF either, the same
 // gap highlightGeometry's own doc comment explains for TextMarkupAnnotation.
-func lineGeometry(xRefTable *model.XRefTable, objNr int) (points []float64, endStyles [2]string, col [3]float64) {
+func lineGeometry(xRefTable *model.XRefTable, objNr int) (points []float64, endStyles [2]string, col [3]float64, lineWidth float64) {
 	endStyles = [2]string{"None", "None"} // the PDF spec's own default when /LE is absent
 	if objNr <= 0 {
-		return nil, endStyles, defaultHighlightColor
+		return nil, endStyles, defaultHighlightColor, defaultLineWidthPt
 	}
 	d, err := xRefTable.DereferenceDict(*types.NewIndirectRef(objNr, 0))
 	if err != nil || d == nil {
-		return nil, endStyles, defaultHighlightColor
+		return nil, endStyles, defaultHighlightColor, defaultLineWidthPt
 	}
 	points = parseLinePoints(xRefTable, d.ArrayEntry("L"))
 	if points != nil {
@@ -351,6 +423,7 @@ func lineGeometry(xRefTable *model.XRefTable, objNr int) (points []float64, endS
 		}
 	}
 	col = parseColor(xRefTable, d.ArrayEntry("C"))
+	lineWidth = parseBorderWidth(xRefTable, d, defaultLineWidthPt)
 	if names := d.ArrayEntry("LE"); len(names) == 2 {
 		for i, n := range names {
 			if nm, ok := n.(types.Name); ok {
@@ -358,7 +431,7 @@ func lineGeometry(xRefTable *model.XRefTable, objNr int) (points []float64, endS
 			}
 		}
 	}
-	return points, endStyles, col
+	return points, endStyles, col, lineWidth
 }
 
 // parseLinePoints converts a PDF /L array (exactly 4 numbers: x1, y1, x2,
@@ -501,6 +574,38 @@ func parseColor(xRefTable *model.XRefTable, arr types.Array) [3]float64 {
 	}
 }
 
+// parseBorderWidth reads d's own /BS (border style) dict's /W (width)
+// entry — PDF user-space points — falling back to defaultWidth for
+// anything missing or malformed (no /BS at all, which is the PDF spec's
+// own signal to use a 1pt default border; an unresolvable /W; or /BS not
+// actually a dict). Dereferences /BS itself via xRefTable.Dereference
+// rather than types.Dict's own DictEntry, which doesn't resolve an
+// indirect reference (an edge case a real /BS is unlikely to hit in
+// practice, but cheap to handle correctly rather than assume away).
+func parseBorderWidth(xRefTable *model.XRefTable, d types.Dict, defaultWidth float64) float64 {
+	obj, found := d.Find("BS")
+	if !found {
+		return defaultWidth
+	}
+	resolved, err := xRefTable.Dereference(obj)
+	if err != nil {
+		return defaultWidth
+	}
+	bs, ok := resolved.(types.Dict)
+	if !ok {
+		return defaultWidth
+	}
+	wObj, found := bs.Find("W")
+	if !found {
+		return defaultWidth
+	}
+	w, err := xRefTable.DereferenceNumber(wObj)
+	if err != nil {
+		return defaultWidth
+	}
+	return w
+}
+
 // cmykToRGB is the standard naive (non-color-managed) CMYK->RGB conversion —
 // good enough for tinting a highlight overlay, not intended for print-accurate
 // color reproduction.
@@ -589,33 +694,45 @@ func (d *Document) paintHighlights(img *image.RGBA, page int, dpi float64) {
 		// app must paint it itself:
 		//   - ObjNr == 0: freshly drawn via AddHighlight, doesn't exist in
 		//     the file at all yet.
-		//   - a pending, not-yet-saved COLOR change on an already-saved
-		//     highlight: rebuildDoc's own buildNormalizedDoc (document.go)
-		//     deletes this exact annotation from the normalized scratch
-		//     copy d.doc renders from, specifically so this hand-paint
-		//     path can safely draw its NEW color without doubling up a
-		//     stale baked appearance underneath it — see that function's
-		//     own doc comment for why an in-place /C edit alone can't work
-		//     here (a real annotation's baked /AP appearance stream wins
-		//     over /C in MuPDF's real rendering, confirmed empirically).
+		//   - a pending, not-yet-saved COLOR, LINE WEIGHT, or geometry
+		//     change (from Move — Highlight.geometryMoved) on an
+		//     already-saved highlight, PROVIDED newAnnotationForShape can
+		//     actually produce a correct replacement for it (the same
+		//     condition buildNormalizedDoc's own removeObjNrs loop already
+		//     requires before deleting it from the scratch copy d.doc
+		//     renders from — see that function's own doc comment): this
+		//     hand-paint path can then safely draw the NEW color/width/
+		//     position without doubling up a stale baked appearance
+		//     underneath it (an in-place /C, /BS, or geometry edit alone
+		//     can't work here — a real annotation's baked /AP appearance
+		//     stream wins over /C, its own border width, and its original
+		//     position in MuPDF's real rendering, confirmed empirically).
+		//     When it DOESN'T hold (e.g. a Vertices-less Polygon/Ink/
+		//     PolyLine recolored or reweighted after being loaded, rather
+		//     than freshly drawn this session), buildNormalizedDoc leaves
+		//     the old annotation in place rather than deleting it, so
+		//     needsHandPaint must also stay false here — otherwise this
+		//     would hand-paint an inaccurate fallback (a plain box) RIGHT
+		//     ON TOP of MuPDF's own correct, merely stale-valued render of
+		//     the shape still sitting in that scratch copy.
 		// Either way, the selection outline below still needs to run —
 		// it's a UI affordance over an already-rendered page, not
 		// something MuPDF has any notion of.
-		_, colorChanged := highlightDictChanges(h)
-		needsHandPaint := h.ObjNr == 0 || colorChanged
+		_, colorChanged, lineWidthChanged, geometryChanged := highlightDictChanges(h)
+		needsHandPaint := h.ObjNr == 0 || ((colorChanged || lineWidthChanged || geometryChanged) && newAnnotationForShape(h) != nil)
 
 		if hasGenericRect {
-			// Square/Circle/Polygon/FreeText are the kinds this app can
+			// Square/Circle/Polygon/FreeText/Ink are the kinds this app can
 			// itself author (see AddRectShape/AddPolygonShape/
-			// AddTextShape) and so the only ones ever hand-painted here,
-			// only while needsHandPaint (in practice, only ObjNr == 0 —
-			// freshly drawn, not yet saved; none of these four have a
-			// recolor UI, so colorChanged is never true for them). Every
-			// OTHER genericRectKinds member (Stamp, PolyLine, Ink, Caret)
-			// has no per-kind geometry this app can draw at all — see
-			// Highlight.Rect's own doc comment — and isn't ever authored
-			// by this app either, so needsHandPaint should never be true
-			// for one in practice; MuPDF's own render (see
+			// AddTextShape/AddInkShape) and so the only ones ever
+			// hand-painted here, only while needsHandPaint (in practice,
+			// only ObjNr == 0 — freshly drawn, not yet saved; none of
+			// these five have a recolor UI, so colorChanged is never true
+			// for them). Every OTHER genericRectKinds member (Stamp,
+			// PolyLine, Caret) has no per-kind geometry this app can draw
+			// at all — see Highlight.Rect's own doc comment — and isn't
+			// ever authored by this app either, so needsHandPaint should
+			// never be true for one in practice; MuPDF's own render (see
 			// needsHandPaint's doc comment above) already paints anything
 			// already-saved correctly from its baked /AP appearance
 			// stream regardless.
@@ -623,12 +740,12 @@ func (d *Document) paintHighlights(img *image.RGBA, page int, dpi float64) {
 			if needsHandPaint {
 				switch h.Kind {
 				case "Square":
-					drawRectOutline(img, r, lineCol, defaultShapeStrokeWidthPx(scale))
+					drawRectOutline(img, r, lineCol, shapeStrokeWidthPx(h.LineWidth, scale))
 				case "Circle":
-					drawEllipseOutline(img, r, lineCol, float64(defaultShapeStrokeWidthPx(scale)))
+					drawEllipseOutline(img, r, lineCol, float64(shapeStrokeWidthPx(h.LineWidth, scale)))
 				case "Polygon":
 					if len(h.Vertices) >= 3 {
-						drawPolygonOutline(img, polygonPixelVertices(h.Vertices, pageHeightPt, scale), lineCol, float64(defaultShapeStrokeWidthPx(scale)))
+						drawPolygonOutline(img, polygonPixelVertices(h.Vertices, pageHeightPt, scale), lineCol, float64(shapeStrokeWidthPx(h.LineWidth, scale)))
 					} else {
 						// An already-saved Polygon this app didn't draw
 						// itself (e.g. a real Preview-authored one) has no
@@ -639,10 +756,22 @@ func (d *Document) paintHighlights(img *image.RGBA, page int, dpi float64) {
 						// this fallback a recolor would delete it from the
 						// scratch copy and then paint nothing back at all,
 						// making it vanish instead of changing color.
-						drawRectOutline(img, r, lineCol, defaultShapeStrokeWidthPx(scale))
+						drawRectOutline(img, r, lineCol, shapeStrokeWidthPx(h.LineWidth, scale))
 					}
 				case "FreeText":
 					drawFreeTextPreview(img, r, h, pageHeightPt, scale, lineCol)
+				case "Ink", "PolyLine":
+					if len(h.Vertices) >= 2 {
+						drawPolylineOutline(img, polygonPixelVertices(h.Vertices, pageHeightPt, scale), lineCol, float64(shapeStrokeWidthPx(h.LineWidth, scale)))
+					} else {
+						// Same fallback reasoning as Polygon above: an
+						// already-saved Ink/PolyLine this app didn't draw
+						// itself has no Vertices at all (only ever
+						// populated for one this app just drew — see
+						// Highlight.Vertices' own doc comment), so draw
+						// its bounding box rather than nothing.
+						drawRectOutline(img, r, lineCol, shapeStrokeWidthPx(h.LineWidth, scale))
+					}
 				}
 			}
 			if h == d.selectedHighlight {
@@ -654,7 +783,7 @@ func (d *Document) paintHighlights(img *image.RGBA, page int, dpi float64) {
 		if h.Kind == "Line" {
 			var r image.Rectangle
 			if needsHandPaint {
-				r = drawLineAnnotation(img, h.Line, h.LineEndStyle, defaultLineWidthPt, lineCol, pageHeightPt, scale)
+				r = drawLineAnnotation(img, h.Line, h.LineEndStyle, h.LineWidth, lineCol, pageHeightPt, scale)
 			} else {
 				r = lineBoundsPixelRect(h.Line, pageHeightPt, scale)
 			}
@@ -798,23 +927,47 @@ func polygonPixelVertices(vertices [][2]float64, pageHeightPt, scale float64) []
 // Polygon annotation would reuse this unchanged, only the vertex
 // generator (view_render.go's starVertices/hexagonVertices) differs.
 func drawPolygonOutline(img *image.RGBA, vertices [][2]float64, col color.NRGBA, widthPx float64) {
+	strokeVertexPath(img, vertices, col, widthPx, true)
+}
+
+// drawPolylineOutline strokes an OPEN path — connecting each vertex to the
+// next but NOT closing back to the first — drawPolygonOutline's own
+// sibling for a shape that shouldn't close its loop. Used for Ink's own
+// hand-paint preview (paintHighlights' needsHandPaint gate): a freehand
+// stroke's last point connecting back to its first would draw a stray
+// closing segment no real pen stroke ever had.
+func drawPolylineOutline(img *image.RGBA, vertices [][2]float64, col color.NRGBA, widthPx float64) {
+	strokeVertexPath(img, vertices, col, widthPx, false)
+}
+
+// strokeVertexPath is drawPolygonOutline/drawPolylineOutline's shared
+// implementation — connects each vertex to the next via strokeLine (the
+// same "compose from existing straight-line-stroking code" approach
+// drawLineAnnotation's own shaft already uses, rather than a general
+// path-stroking algorithm this file has never needed before), and, only
+// when closed, one final edge back to the first vertex.
+func strokeVertexPath(img *image.RGBA, vertices [][2]float64, col color.NRGBA, widthPx float64, closed bool) {
 	n := len(vertices)
 	if n < 2 {
 		return
 	}
-	for i := 0; i < n; i++ {
+	segments := n - 1
+	if closed {
+		segments = n
+	}
+	for i := 0; i < segments; i++ {
 		a, b := vertices[i], vertices[(i+1)%n]
 		strokeLine(img, a, b, widthPx, col)
 	}
 }
 
-// defaultShapeStrokeWidthPx converts defaultShapeBorderWidthPt (the same
-// /BS /W value a freshly-drawn Square/Circle is authored with — see
-// highlight_edit.go) into already-scaled image pixels, floored to 1px so
-// the stroke never vanishes at a low zoom — the same floor pattern
-// drawLineAnnotation/markupLineRect already use for their own strokes.
-func defaultShapeStrokeWidthPx(scale float64) int {
-	px := int(defaultShapeBorderWidthPt * scale)
+// shapeStrokeWidthPx converts widthPt (a shape's own Highlight.LineWidth,
+// in PDF points — see its own doc comment) into already-scaled image
+// pixels, floored to 1px so the stroke never vanishes at a low zoom — the
+// same floor pattern drawLineAnnotation/markupLineRect already use for
+// their own strokes.
+func shapeStrokeWidthPx(widthPt, scale float64) int {
+	px := int(widthPt * scale)
 	if px < 1 {
 		px = 1
 	}
@@ -1177,6 +1330,39 @@ func quadPixelRect(q [8]float64, pageHeightPt, scale float64) image.Rectangle {
 		int(minX*scale), int((pageHeightPt-maxY)*scale),
 		int(maxX*scale), int((pageHeightPt-minY)*scale),
 	)
+}
+
+// highlightBoundsPt returns h's own overall bounding box in PDF user-space
+// points, regardless of Kind — the union of every Quads entry for a
+// paintableMarkupKinds member, Line's own two endpoints, or Rect directly
+// for a genericRectKinds member. Mirrors the exact geometry paintHighlights
+// already keys off per kind, just returning a plain bounding box instead of
+// painting anything. Used by the Move gesture (handleHighlightMoveHitTest)
+// to test whether a drag started on the selected highlight and to show its
+// current bounds as a ghost outline while dragging. ok is false for a
+// highlight with no usable geometry at all — the same "nothing to paint
+// here" condition RenderPage's own early-continue already checks.
+func highlightBoundsPt(h *Highlight) (rect [4]float64, ok bool) {
+	switch {
+	case h.Kind == "Line" && len(h.Line) == 4:
+		minX, maxX := min(h.Line[0], h.Line[2]), max(h.Line[0], h.Line[2])
+		minY, maxY := min(h.Line[1], h.Line[3]), max(h.Line[1], h.Line[3])
+		return [4]float64{minX, minY, maxX, maxY}, true
+	case genericRectKinds[h.Kind]:
+		if h.Rect == [4]float64{} {
+			return [4]float64{}, false
+		}
+		return h.Rect, true
+	case len(h.Quads) > 0:
+		minX, minY, maxX, maxY := quadBoundsPt(h.Quads[0])
+		for _, q := range h.Quads[1:] {
+			qMinX, qMinY, qMaxX, qMaxY := quadBoundsPt(q)
+			minX, minY = min(minX, qMinX), min(minY, qMinY)
+			maxX, maxY = max(maxX, qMaxX), max(maxY, qMaxY)
+		}
+		return [4]float64{minX, minY, maxX, maxY}, true
+	}
+	return [4]float64{}, false
 }
 
 // quadBoundsPt returns q's axis-aligned bounding box in PDF user-space

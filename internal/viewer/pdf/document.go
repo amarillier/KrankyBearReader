@@ -260,27 +260,33 @@ func (d *Document) rebuildDoc() error {
 // describes. Returns the temp file's path alongside the opened document so
 // the caller can track it for later cleanup.
 //
-// A pending COLOR change on an already-saved highlight is applied by
+// A pending COLOR change, or a geometry change from the Move gesture
+// (Highlight.geometryMoved), on an already-saved highlight is applied by
 // deleting that annotation from this scratch copy entirely (folded into
 // the same removeAnnotationsRepairingIfNeeded call pendingHighlightDeletes
-// already uses), not by patching its /C in place. Found necessary the hard
-// way: a real Preview/Acrobat-authored annotation already carries its own
-// baked /AP appearance stream, and MuPDF's real annotation rendering (see
-// CLAUDE.md) always paints from that stream when present — confirmed
-// empirically (a before/after pixel dump on a real file's actual
-// highlight showed the exact same pixels after rewriting /C to a
-// different color) that updating /C alone has NO visual effect once /AP
-// exists, no matter how many times the file is re-normalized. Deleting
-// the annotation from this scratch copy removes its baked appearance
-// entirely, so paintHighlights (annotations.go) can safely hand-paint it
-// in its new color on top — the exact same code path already used for a
+// already uses), not by patching its /C or geometry in place. Found
+// necessary the hard way for color: a real Preview/Acrobat-authored
+// annotation already carries its own baked /AP appearance stream, and
+// MuPDF's real annotation rendering (see CLAUDE.md) always paints from
+// that stream when present — confirmed empirically (a before/after pixel
+// dump on a real file's actual highlight showed the exact same pixels
+// after rewriting /C to a different color) that updating /C alone has NO
+// visual effect once /AP exists, no matter how many times the file is
+// re-normalized. Geometry has the exact same problem (an /AP's own content
+// stream is baked against its original position, so a bare /Rect/
+// QuadPoints rewrite wouldn't move what's actually painted either) — see
+// ReleaseNotes' "move an existing shape" note. Deleting the annotation
+// from this scratch copy removes its baked appearance entirely, so
+// paintHighlights (annotations.go) can safely hand-paint it in its new
+// color/position on top — the exact same code path already used for a
 // brand-new, not-yet-saved highlight, now also covering "existing, but
-// its rendered color is stale" for the same reason: MuPDF has nothing of
-// its own to show for it in this scratch copy either way. This is safe
-// against a DIFFERENT overlapping annotation the same way Delete already
-// is (see CLAUDE.md's "Making a deleted highlight disappear immediately"
-// section): it's a real, full MuPDF render of a file with only this one
-// annotation missing, not a hand-painted patch over a region.
+// its rendered color or position is stale" for the same reason: MuPDF has
+// nothing of its own to show for it in this scratch copy either way. This
+// is safe against a DIFFERENT overlapping annotation the same way Delete
+// already is (see CLAUDE.md's "Making a deleted highlight disappear
+// immediately" section): it's a real, full MuPDF render of a file with
+// only this one annotation missing, not a hand-painted patch over a
+// region.
 func (d *Document) buildNormalizedDoc() (*fitz.Document, string, error) {
 	ctx, err := api.ReadContextFile(d.path)
 	if err != nil {
@@ -292,7 +298,30 @@ func (d *Document) buildNormalizedDoc() (*fitz.Document, string, error) {
 		if h.ObjNr <= 0 {
 			continue
 		}
-		if _, colorChanged := highlightDictChanges(h); colorChanged {
+		// Only delete (and so only rely on paintHighlights' own hand-paint
+		// to show the change) when newAnnotationForShape can actually
+		// produce a correct replacement — the same question SaveHighlights'
+		// own recreate-computation already asks for the real file. A
+		// Vertices-less Polygon/Ink/PolyLine (any one loaded from a file,
+		// including this app's own earlier save — Vertices is never kept
+		// across a reload, see Highlight.Vertices' own doc comment) fails
+		// this check, and deleting it anyway would leave nothing but a
+		// misleading box where the real shape used to be — found via real
+		// user testing, not anticipated: changing an already-saved Ink
+		// stroke's line weight made the actual freehand line visually
+		// "disappear" into a plain rectangle until Save, even though nothing
+		// was actually lost (confirmed separately: the real save always
+		// applies the new value correctly either way, via
+		// applyPendingHighlightEdits' own in-place fallback for exactly
+		// this "can't recreate" case). Leaving it undeleted here instead
+		// means MuPDF keeps rendering its own correct, merely stale-colored/
+		// stale-weighted shape until Save actually changes it — confusing in
+		// a different way (the value LOOKS unchanged), but not alarming the
+		// way a shape unexpectedly turning into a box is. See
+		// highlightsPanel's own changeSelectedColor/changeSelectedLineWidth
+		// for the transient notice shown when this applies.
+		_, colorChanged, lineWidthChanged, geometryChanged := highlightDictChanges(h)
+		if (colorChanged || lineWidthChanged || geometryChanged) && newAnnotationForShape(h) != nil {
 			removeObjNrs = append(removeObjNrs, h.ObjNr)
 		}
 	}
@@ -301,13 +330,13 @@ func (d *Document) buildNormalizedDoc() (*fitz.Document, string, error) {
 			return nil, "", fmt.Errorf("removing pending highlights: %w", err)
 		}
 	}
-	// Only a caption edit can still land here (a color-changed highlight
-	// was just deleted above, so DereferenceDict on its ObjNr will find
-	// nothing and applyPendingHighlightEdits' own existing nil-dict check
-	// skips it harmlessly) — captions aren't painted at all (see
-	// paintHighlights), so this has no rendering effect either way, but
-	// keeps this scratch copy's behavior symmetric with the real save.
-	if err := applyPendingHighlightEdits(ctx, d.Highlights); err != nil {
+	// Only a caption edit can still land here (a color- or geometry-changed
+	// highlight was just deleted above, so DereferenceDict on its ObjNr
+	// will find nothing and applyPendingHighlightEdits' own existing
+	// nil-dict check skips it harmlessly) — captions aren't painted at all
+	// (see paintHighlights), so this has no rendering effect either way,
+	// but keeps this scratch copy's behavior symmetric with the real save.
+	if err := applyPendingHighlightEdits(ctx, d.Highlights, nil); err != nil {
 		return nil, "", fmt.Errorf("applying pending highlight edits: %w", err)
 	}
 

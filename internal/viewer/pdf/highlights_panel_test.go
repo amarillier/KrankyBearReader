@@ -155,6 +155,69 @@ func TestHandleHighlightDrawn_ShapeKinds(t *testing.T) {
 	}
 }
 
+// TestHandleFreehandDrawn_AddsInkWithEveryPointConverted confirms Ink's
+// own view-layer entry point (handleFreehandDrawn, wired to
+// highlightDrawer.OnFreehandDrawn) converts every sampled widget-space
+// point — not just a start/end pair, unlike every other shape's
+// handleHighlightDrawn path — into PDF space, in order, and adds the
+// result as a single new Ink-kind Highlight.
+func TestHandleFreehandDrawn_AddsInkWithEveryPointConverted(t *testing.T) {
+	v := newTestView(t)
+	pageW, pageH, err := v.doc.PageBoundsPt(1)
+	if err != nil {
+		t.Fatalf("PageBoundsPt: %v", err)
+	}
+	widgetSize := fyne.NewSize(float32(pageW), float32(pageH)) // 1:1
+
+	points := []fyne.Position{
+		fyne.NewPos(20, 20),
+		fyne.NewPos(25, 40),
+		fyne.NewPos(60, 30),
+	}
+	v.handleFreehandDrawn(1, points, widgetSize)
+
+	if len(v.doc.Highlights) != 1 {
+		t.Fatalf("expected 1 new highlight, got %d", len(v.doc.Highlights))
+	}
+	got := v.doc.Highlights[0]
+	if got.Kind != "Ink" {
+		t.Fatalf("got Kind = %q, want Ink", got.Kind)
+	}
+	if len(got.Vertices) != len(points) {
+		t.Fatalf("got %d vertices, want %d", len(got.Vertices), len(points))
+	}
+	for i, p := range points {
+		wantX, wantY := widgetPointToPDF(p, widgetSize, pageW, pageH)
+		if got.Vertices[i][0] != wantX || got.Vertices[i][1] != wantY {
+			t.Errorf("vertex %d = %v, want (%v,%v)", i, got.Vertices[i], wantX, wantY)
+		}
+	}
+}
+
+// TestHandleFreehandDrawn_PolyLineKindRoutesToAddPolyLineShape confirms
+// handleFreehandDrawn picks AddPolyLineShape instead of AddInkShape when
+// v.drawKind is "PolyLine" — the one branch distinguishing the two kinds,
+// since both otherwise share the exact same freehand capture (see
+// AddPolyLineShape's own doc comment).
+func TestHandleFreehandDrawn_PolyLineKindRoutesToAddPolyLineShape(t *testing.T) {
+	v := newTestView(t)
+	pageW, pageH, err := v.doc.PageBoundsPt(1)
+	if err != nil {
+		t.Fatalf("PageBoundsPt: %v", err)
+	}
+	widgetSize := fyne.NewSize(float32(pageW), float32(pageH))
+
+	v.drawKind = "PolyLine"
+	v.handleFreehandDrawn(1, []fyne.Position{fyne.NewPos(20, 20), fyne.NewPos(60, 30)}, widgetSize)
+
+	if len(v.doc.Highlights) != 1 {
+		t.Fatalf("expected 1 new highlight, got %d", len(v.doc.Highlights))
+	}
+	if got := v.doc.Highlights[0].Kind; got != "PolyLine" {
+		t.Errorf("got Kind = %q, want PolyLine", got)
+	}
+}
+
 // TestHandleHighlightDrawn_TextKindsDeferToDialog confirms Text/Speech
 // Bubble don't add anything to v.doc.Highlights immediately the way
 // every other kind does -- creation is deferred to promptForShapeText's

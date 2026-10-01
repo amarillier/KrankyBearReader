@@ -96,6 +96,7 @@ func newHighlightsPanel(v *view) *highlightsPanel {
 
 	editBtn := widget.NewButton("Edit Caption", hp.editSelected)
 	colorBtn := widget.NewButton("Change Color", hp.changeSelectedColor)
+	lineWidthBtn := widget.NewButton("Change Line Weight", hp.changeSelectedLineWidth)
 
 	deleteBtn := widget.NewButton("Delete Selected", hp.deleteSelected)
 	deleteBtn.Importance = widget.WarningImportance
@@ -110,7 +111,7 @@ func newHighlightsPanel(v *view) *highlightsPanel {
 	// PDF) is a VBox for exactly this reason: stacked, the panel's MinSize
 	// is only its single widest button, matching how TOC/Bookmarks already
 	// narrow down freely.
-	toolbar := container.NewVBox(editBtn, colorBtn, deleteBtn, saveBtn)
+	toolbar := container.NewVBox(editBtn, colorBtn, lineWidthBtn, deleteBtn, saveBtn)
 
 	hp.container = container.NewBorder(toolbar, nil, nil, nil, hp.list)
 	return hp
@@ -174,6 +175,7 @@ func (hp *highlightsPanel) changeSelectedColor() {
 	}
 	showHighlightColorPicker(hp.v.win, h.Color, func(rgb [3]float64) {
 		hp.v.doc.SetHighlightColor(h, rgb)
+		hp.notifyIfRenderIsDeferred(h, "color")
 		// Deselect rather than just repaint: found via real hands-on
 		// testing that the selection outline (selectionOutlineColor,
 		// solid blue) is drawn on top of the shape's own stroke, right
@@ -185,6 +187,86 @@ func (hp *highlightsPanel) changeSelectedColor() {
 		// needed here.
 		hp.deselect()
 	})
+}
+
+// notifyIfRenderIsDeferred shows a brief, auto-dismissing notice when h's
+// just-changed color/line weight WON'T actually show on the page until
+// Save to PDF and a reopen — the case buildNormalizedDoc's own
+// removeObjNrs loop and paintHighlights' own needsHandPaint gate both
+// leave alone rather than risk a misleading fallback box (see their own
+// doc comments): an already-saved Polygon/Ink/PolyLine with no Vertices
+// in memory (any one loaded from a file, including this app's own earlier
+// save — Vertices is never kept across a reload) AND a real baked /AP
+// appearance stream, which is what makes applyPendingHighlightEdits' own
+// in-place /C or /BS fallback a cosmetic no-op rather than something
+// MuPDF's default-appearance synthesis already shows immediately — see
+// highlightHasBakedAppearance's own doc comment for why that second
+// condition matters: this app never bakes an /AP for anything it authors
+// itself, so a Polygon/Ink/PolyLine THIS APP drew (even reloaded in a
+// later session, Vertices gone from memory either way) already updates
+// correctly without saving, and showing this notice for that case would
+// incorrectly contradict what the page is already displaying.
+//
+// Found necessary via real user testing: silently leaving the page
+// showing the OLD value with no feedback at all (the genuinely-foreign,
+// baked-/AP case) reads just as confusingly as the misleading-box
+// behavior it replaced ("did my change not take?"), just in a different
+// way. A no-op for a not-yet-saved highlight (ObjNr == 0, always fully
+// paintable) or any kind that doesn't need Vertices to paint correctly
+// (Square/Circle/Line/FreeText).
+func (hp *highlightsPanel) notifyIfRenderIsDeferred(h *Highlight, what string) {
+	if h.ObjNr <= 0 || newAnnotationForShape(h) != nil {
+		return
+	}
+	if !highlightHasBakedAppearance(hp.v.doc.Path(), h.ObjNr) {
+		return // the in-place /C or /BS patch already took effect immediately
+	}
+	hp.showTransientInfo("Change pending",
+		fmt.Sprintf("The new %s will show once you Save to PDF and reopen the file — this shape's exact outline isn't kept in memory once loaded from disk.", what))
+}
+
+// changeSelectedLineWidth updates the selected highlight's stroke/border
+// width and repaints it immediately — the exact same shape as
+// changeSelectedColor, including the deselect-rather-than-just-repaint
+// reasoning (the selection outline can otherwise mask a width change the
+// same way it can mask a color change). Only a hasLineWidth kind (Square,
+// Circle, Line, Polygon, Ink, PolyLine — deliberately narrower than
+// hasPaintedColor: excludes FreeText, see Highlight.LineWidth's own doc
+// comment for why a configurable width would have no visible effect on
+// it, and every paintableMarkupKinds member, which have no /BS stroke
+// width concept at all) actually has a line weight to change.
+func (hp *highlightsPanel) changeSelectedLineWidth() {
+	h := hp.selected
+	if h == nil {
+		dialog.ShowInformation("No Selection", "Please select a shape to change its line weight", hp.v.win)
+		return
+	}
+	if !hasLineWidth(h.Kind) {
+		dialog.ShowInformation("Not supported",
+			fmt.Sprintf("%s annotations don't have an adjustable line weight.", h.Kind),
+			hp.v.win)
+		return
+	}
+
+	widthSelect := widget.NewSelect(lineWeightOptions(), nil)
+	widthSelect.Selected = lineWeightLabel(h.LineWidth)
+	form := widget.NewForm(widget.NewFormItem("Line Weight:", widthSelect))
+
+	d := dialog.NewCustomConfirm("Change Line Weight", "Change", "Cancel", form, func(ok bool) {
+		if !ok {
+			return
+		}
+		w, valid := parseLineWeightLabel(widthSelect.Selected)
+		if !valid {
+			return
+		}
+		hp.v.doc.SetHighlightLineWidth(h, w)
+		hp.notifyIfRenderIsDeferred(h, "line weight")
+		hp.deselect()
+	}, hp.v.win)
+
+	d.Resize(fyne.NewSize(360, 180))
+	d.Show()
 }
 
 // deselect clears the currently-selected highlight, if any — the reverse

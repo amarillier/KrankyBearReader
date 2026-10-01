@@ -241,9 +241,9 @@ func TestSaveHighlights_ShapeAddRoundTrips(t *testing.T) {
 	writeMinimalPDF(t, path)
 
 	doc := &Document{path: path, cache: newPageCache(pageCacheCapacity)}
-	doc.AddRectShape(1, "Square", [4]float64{10, 10, 60, 60}, [3]float64{1, 0, 0})
-	doc.AddRectShape(1, "Circle", [4]float64{70, 70, 150, 130}, [3]float64{0, 1, 0})
-	doc.AddLineShape(1, []float64{20, 30, 80, 90}, [2]string{"None", "ClosedArrow"}, [3]float64{0, 0, 1})
+	doc.AddRectShape(1, "Square", [4]float64{10, 10, 60, 60}, [3]float64{1, 0, 0}, defaultShapeBorderWidthPt)
+	doc.AddRectShape(1, "Circle", [4]float64{70, 70, 150, 130}, [3]float64{0, 1, 0}, defaultShapeBorderWidthPt)
+	doc.AddLineShape(1, []float64{20, 30, 80, 90}, [2]string{"None", "ClosedArrow"}, [3]float64{0, 0, 1}, defaultLineWidthPt)
 
 	if err := doc.SaveHighlights(path); err != nil {
 		t.Fatalf("SaveHighlights: %v", err)
@@ -292,6 +292,63 @@ func TestSaveHighlights_ShapeAddRoundTrips(t *testing.T) {
 	}
 }
 
+// TestSaveHighlights_MarkupShapeAddRoundTrips covers AddMarkupShape
+// (Underline/Strikeout/Squiggly) the same way TestSaveHighlights_
+// ShapeAddRoundTrips above covers Square/Circle/Line: add one of each via
+// this app's own Add path, save, and confirm a fresh reload gets back the
+// right Kind, quad bounds, and color with a real ObjNr — proving
+// newAnnotationForShape's new Underline/Strikeout/Squiggly cases actually
+// write something pdfcpu/MuPDF accepts, not just that they compile.
+func TestSaveHighlights_MarkupShapeAddRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.pdf")
+	writeMinimalPDF(t, path)
+
+	doc := &Document{path: path, cache: newPageCache(pageCacheCapacity)}
+	quad := [8]float64{10, 60, 60, 60, 10, 10, 60, 10} // bounds [10,10]-[60,60]
+	doc.AddMarkupShape(1, "Underline", [][8]float64{quad}, [3]float64{1, 0, 0})
+	doc.AddMarkupShape(1, "Strikeout", [][8]float64{quad}, [3]float64{0, 1, 0})
+	doc.AddMarkupShape(1, "Squiggly", [][8]float64{quad}, [3]float64{0, 0, 1})
+
+	if err := doc.SaveHighlights(path); err != nil {
+		t.Fatalf("SaveHighlights: %v", err)
+	}
+
+	if len(doc.Highlights) != 3 {
+		t.Fatalf("expected 3 reloaded shapes, got %d: %+v", len(doc.Highlights), doc.Highlights)
+	}
+
+	byKind := map[string]*Highlight{}
+	for _, h := range doc.Highlights {
+		if h.ObjNr <= 0 {
+			t.Errorf("expected a real ObjNr for reloaded kind=%s, got %d", h.Kind, h.ObjNr)
+		}
+		byKind[h.Kind] = h
+	}
+
+	wantColor := map[string][3]float64{
+		"Underline": {1, 0, 0},
+		"Strikeout": {0, 1, 0},
+		"Squiggly":  {0, 0, 1},
+	}
+	for kind, wantCol := range wantColor {
+		h := byKind[kind]
+		if h == nil {
+			t.Fatalf("expected a reloaded %s, got none among %+v", kind, doc.Highlights)
+		}
+		if len(h.Quads) != 1 {
+			t.Fatalf("%s: expected 1 quad, got %d", kind, len(h.Quads))
+		}
+		minX, minY, maxX, maxY := quadBoundsPt(h.Quads[0])
+		if minX != 10 || minY != 10 || maxX != 60 || maxY != 60 {
+			t.Errorf("%s quad bounds = [%v %v %v %v], want [10 10 60 60]", kind, minX, minY, maxX, maxY)
+		}
+		if h.Color != wantCol {
+			t.Errorf("%s.Color = %v, want %v", kind, h.Color, wantCol)
+		}
+	}
+}
+
 // TestSaveHighlights_PolygonAndFreeTextRoundTrips covers the two newest
 // TestNewAnnotationForShape_FreeTextAlwaysHasBorderWidth confirms both a
 // plain text block and a speech bubble are authored with the same
@@ -336,7 +393,7 @@ func TestSaveHighlights_PolygonAndFreeTextRoundTrips(t *testing.T) {
 
 	doc := &Document{path: path, cache: newPageCache(pageCacheCapacity)}
 	star := starVertices(50, 50, 40, 40)
-	doc.AddPolygonShape(1, star, [3]float64{1, 1, 0})
+	doc.AddPolygonShape(1, star, [3]float64{1, 1, 0}, defaultShapeBorderWidthPt)
 	tip := [2]float64{5, 5}
 	doc.AddTextShape(1, [4]float64{10, 10, 110, 60}, nil, "a plain text block", [3]float64{0, 0, 0})
 	doc.AddTextShape(1, [4]float64{120, 70, 190, 130}, &tip, "speech bubble text", [3]float64{0, 0, 1})
@@ -384,6 +441,155 @@ func TestSaveHighlights_PolygonAndFreeTextRoundTrips(t *testing.T) {
 	}
 	if !gotContents["a plain text block"] || !gotContents["speech bubble text"] {
 		t.Errorf("expected both FreeText captions reloaded, got %v", gotContents)
+	}
+}
+
+// TestSaveHighlights_InkRoundTrips mirrors TestSaveHighlights_
+// ShapeAddRoundTrips for AddInkShape: add a freehand stroke via this app's
+// own Add path, save, and confirm a fresh reload gets back the right
+// Kind, bounding Rect, and color with a real ObjNr.
+func TestSaveHighlights_InkRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.pdf")
+	writeMinimalPDF(t, path)
+
+	doc := &Document{path: path, cache: newPageCache(pageCacheCapacity)}
+	stroke := [][2]float64{{10, 10}, {20, 40}, {35, 15}, {50, 50}}
+	doc.AddInkShape(1, stroke, [3]float64{0, 0, 1}, defaultShapeBorderWidthPt)
+
+	if err := doc.SaveHighlights(path); err != nil {
+		t.Fatalf("SaveHighlights: %v", err)
+	}
+
+	if len(doc.Highlights) != 1 {
+		t.Fatalf("expected 1 reloaded shape, got %d: %+v", len(doc.Highlights), doc.Highlights)
+	}
+	got := doc.Highlights[0]
+	if got.Kind != "Ink" {
+		t.Fatalf("expected reloaded Kind=Ink, got %q", got.Kind)
+	}
+	if got.ObjNr <= 0 {
+		t.Errorf("expected a real ObjNr for the reloaded Ink stroke, got %d", got.ObjNr)
+	}
+	wantMinX, wantMinY, wantMaxX, wantMaxY := verticesBoundsPt(stroke)
+	want := [4]float64{wantMinX, wantMinY, wantMaxX, wantMaxY}
+	for i := range want {
+		if math.Abs(got.Rect[i]-want[i]) > 0.01 {
+			t.Errorf("Ink.Rect = %v, want %v (the stroke's own bounding box)", got.Rect, want)
+			break
+		}
+	}
+	if got.Color != [3]float64{0, 0, 1} {
+		t.Errorf("Ink.Color = %v, want [0 0 1]", got.Color)
+	}
+}
+
+// TestSaveHighlights_RecolorAfterSavePreservesVertices is a real,
+// user-reported bug: draw an Ink stroke, Save to PDF once, then recolor
+// it in the SAME session (no reopen) — the real Highlights panel always
+// re-selects the current doc.Highlights entry, so this uses the post-save
+// pointer, not a stale one. Change Color visibly worked, but the stroke
+// turned into a plain rectangle: SaveHighlights' own post-save reload
+// unconditionally replaced d.Highlights with a fresh LoadHighlights read,
+// and pdfcpu's read path never populates Vertices back from an existing
+// PDF (see Highlight.Vertices' own doc comment) — so ANY save, even
+// within the same session, silently wiped Vertices for every Polygon/Ink/
+// PolyLine/speech-bubble shape this app itself had just drawn, not just
+// ones loaded from another app. paintHighlights' own "no Vertices, draw a
+// plain Rect instead" fallback (there for a genuinely foreign shape with
+// no Vertices at all) then fired for a shape this app still had the real
+// geometry for, a moment before the reload threw it away.
+//
+// Fixed by capturing each new/recreated annotation's own fresh ObjNr
+// directly from pdfcpu.AddAnnotationToPage's return value (replacing the
+// batched, return-nothing pdfcpu.AddAnnotationsMap), then using that
+// accurate ObjNr to carry Vertices/CalloutTip forward from the pre-reload
+// highlight onto its freshly-reloaded replacement, instead of discarding
+// them. This test also covers the ObjNr-tracking fix on its own terms:
+// without it, a second save after a reload wouldn't know the first
+// highlight already existed and would add a duplicate.
+func TestSaveHighlights_RecolorAfterSavePreservesVertices(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.pdf")
+	writeMinimalPDF(t, path)
+
+	doc := &Document{path: path, cache: newPageCache(pageCacheCapacity)}
+	doc.AddInkShape(1, [][2]float64{{10, 10}, {30, 60}, {60, 20}, {90, 80}}, [3]float64{1, 0, 0}, defaultShapeBorderWidthPt)
+
+	if err := doc.SaveHighlights(path); err != nil {
+		t.Fatalf("first SaveHighlights: %v", err)
+	}
+	if len(doc.Highlights) != 1 {
+		t.Fatalf("expected 1 highlight after first save, got %d", len(doc.Highlights))
+	}
+	h := doc.Highlights[0]
+	firstObjNr := h.ObjNr
+	if firstObjNr <= 0 {
+		t.Fatalf("expected a real ObjNr after save, got %d", firstObjNr)
+	}
+	if len(h.Vertices) < 2 {
+		t.Fatalf("Vertices lost after first save, got %v (the bug)", h.Vertices)
+	}
+
+	doc.SetHighlightColor(h, [3]float64{0, 1, 0})
+	if len(h.Vertices) < 2 {
+		t.Fatalf("Vertices lost after recoloring (pre-save), got %v", h.Vertices)
+	}
+
+	if err := doc.SaveHighlights(path); err != nil {
+		t.Fatalf("second SaveHighlights: %v", err)
+	}
+	if len(doc.Highlights) != 1 {
+		t.Fatalf("expected exactly 1 highlight after second save, got %d (duplicate added?)", len(doc.Highlights))
+	}
+	got := doc.Highlights[0]
+	if len(got.Vertices) < 2 {
+		t.Errorf("Vertices lost after second save, got %v", got.Vertices)
+	}
+	if got.Color != [3]float64{0, 1, 0} {
+		t.Errorf("Color after second save = %v, want [0 1 0]", got.Color)
+	}
+}
+
+// TestSaveHighlights_PolyLineRoundTrips mirrors TestSaveHighlights_
+// InkRoundTrips for AddPolyLineShape — same freehand-capture geometry,
+// saved under PDF's own distinct /PolyLine subtype instead of /Ink (see
+// AddPolyLineShape's own doc comment) — confirming the separate
+// newAnnotationForShape "PolyLine" case also actually writes something
+// pdfcpu/MuPDF accepts.
+func TestSaveHighlights_PolyLineRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.pdf")
+	writeMinimalPDF(t, path)
+
+	doc := &Document{path: path, cache: newPageCache(pageCacheCapacity)}
+	stroke := [][2]float64{{10, 10}, {60, 10}, {60, 60}, {10, 60}}
+	doc.AddPolyLineShape(1, stroke, [3]float64{1, 0.5, 0}, defaultShapeBorderWidthPt)
+
+	if err := doc.SaveHighlights(path); err != nil {
+		t.Fatalf("SaveHighlights: %v", err)
+	}
+
+	if len(doc.Highlights) != 1 {
+		t.Fatalf("expected 1 reloaded shape, got %d: %+v", len(doc.Highlights), doc.Highlights)
+	}
+	got := doc.Highlights[0]
+	if got.Kind != "PolyLine" {
+		t.Fatalf("expected reloaded Kind=PolyLine, got %q", got.Kind)
+	}
+	if got.ObjNr <= 0 {
+		t.Errorf("expected a real ObjNr for the reloaded PolyLine, got %d", got.ObjNr)
+	}
+	wantMinX, wantMinY, wantMaxX, wantMaxY := verticesBoundsPt(stroke)
+	want := [4]float64{wantMinX, wantMinY, wantMaxX, wantMaxY}
+	for i := range want {
+		if math.Abs(got.Rect[i]-want[i]) > 0.01 {
+			t.Errorf("PolyLine.Rect = %v, want %v (the path's own bounding box)", got.Rect, want)
+			break
+		}
+	}
+	if got.Color != [3]float64{1, 0.5, 0} {
+		t.Errorf("PolyLine.Color = %v, want [1 0.5 0]", got.Color)
 	}
 }
 
@@ -469,6 +675,227 @@ func TestSaveHighlights_ColorRoundTrips(t *testing.T) {
 	}
 	if got := reloaded[0].Color; got != [3]float64{0, 1, 0} {
 		t.Errorf("expected color %v to round-trip, got %v", [3]float64{0, 1, 0}, got)
+	}
+}
+
+// writeMinimalPDFWithBakedAPHighlight writes a hand-rolled single-page PDF
+// whose one Highlight annotation carries a REAL, hand-authored /AP /N form
+// XObject appearance stream painting solid BLUE, while /C says RED — so a
+// render can unambiguously tell whether a given code path is reading the
+// baked appearance (blue) or synthesizing one from /C (red). This is what
+// distinguishes it from every other highlight fixture in this file (e.g.
+// TestSaveHighlights_ColorRoundTrips' own, built via
+// model.NewHighlightAnnotation + api.AddAnnotationsFile): confirmed
+// directly (a throwaway dict dump, deleted after use) that pdfcpu's own
+// annotation-writing path NEVER bakes an /AP at all, regardless of whether
+// a color is passed — so every other highlight fixture in this file is
+// actually exercising MuPDF's default-appearance-from-/C synthesis path,
+// not the baked-/AP path every REAL Preview/Acrobat-authored highlight
+// actually takes. That gap in test fixtures is exactly how
+// TestSaveHighlights_ColorChangeOnBakedAPHighlightSurvivesRealSave's own
+// bug (below) went unnoticed.
+func writeMinimalPDFWithBakedAPHighlight(t *testing.T, path string) {
+	t.Helper()
+
+	apContent := "0 0 1 rg\n10 10 50 50 re\nf\n"
+	objs := []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << >> /Annots [4 0 R] >>",
+		"<< /Type /Annot /Subtype /Highlight /Rect [10 10 60 60] " +
+			"/QuadPoints [10 60 60 60 10 10 60 10] /C [1 0 0] /AP << /N 5 0 R >> >>",
+		fmt.Sprintf("<< /Type /XObject /Subtype /Form /BBox [10 10 60 60] /Length %d >>\nstream\n%sendstream", len(apContent), apContent),
+	}
+
+	var buf bytes.Buffer
+	buf.WriteString("%PDF-1.4\n")
+	offsets := make([]int, len(objs)+1)
+	for i, body := range objs {
+		offsets[i+1] = buf.Len()
+		fmt.Fprintf(&buf, "%d 0 obj\n%s\nendobj\n", i+1, body)
+	}
+	xrefOffset := buf.Len()
+	fmt.Fprintf(&buf, "xref\n0 %d\n", len(objs)+1)
+	buf.WriteString("0000000000 65535 f \n")
+	for i := 1; i <= len(objs); i++ {
+		fmt.Fprintf(&buf, "%010d 00000 n \n", offsets[i])
+	}
+	fmt.Fprintf(&buf, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF", len(objs)+1, xrefOffset)
+
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatalf("writing baked-AP test PDF: %v", err)
+	}
+}
+
+// dominantNonWhiteColor averages every non-white pixel's color in img —
+// good enough to tell "this render is dominated by blue" from "green" from
+// "nothing painted at all" without needing exact pixel coordinates, which
+// would have to track the zoom/scale math by hand and risk measuring the
+// wrong spot (an earlier draft of this check did exactly that and silently
+// sampled a background pixel outside the annotation, reporting white).
+func dominantNonWhiteColor(t *testing.T, label string, img image.Image) (r, g, b uint32) {
+	t.Helper()
+	bounds := img.Bounds()
+	var rs, gs, bs, n uint64
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			rr, gg, bb, _ := img.At(x, y).RGBA()
+			if rr == 0xffff && gg == 0xffff && bb == 0xffff {
+				continue
+			}
+			rs += uint64(rr >> 8)
+			gs += uint64(gg >> 8)
+			bs += uint64(bb >> 8)
+			n++
+		}
+	}
+	if n == 0 {
+		t.Logf("%s: no non-white pixels at all", label)
+		return 0, 0, 0
+	}
+	r, g, b = uint32(rs/n), uint32(gs/n), uint32(bs/n)
+	t.Logf("%s: avg non-white color over %d px = r=%d g=%d b=%d", label, n, r, g, b)
+	return r, g, b
+}
+
+// TestSaveHighlights_ColorChangeOnBakedAPHighlightSurvivesRealSave is a
+// real, previously-undiscovered bug found while researching the "move an
+// existing shape" Future idea: changing the color of an already-saved
+// highlight that carries a genuine baked /AP (every real Preview/Acrobat-
+// authored one) looked like it worked — the live in-app render updated
+// immediately via buildNormalizedDoc's own hand-paint trick — but a real
+// SaveHighlights only ever rewrote /C in place, and every real PDF
+// renderer (MuPDF included) always prefers a baked /AP over /C when one
+// exists. So the saved file's actual appearance never changed: reopening
+// it fresh (even in this same app, let alone Preview/Acrobat) silently
+// reverted to the original color. Fixed by making SaveHighlights delete a
+// colorChanged, already-saved highlight's annotation object outright and
+// author a brand-new one via newAnnotationForShape (which never bakes an
+// /AP, so it always renders from its own color going forward) — the same
+// mechanism buildNormalizedDoc's scratch copy already used, just also
+// writing the replacement into the REAL file instead of leaving it to be
+// hand-painted.
+//
+// This test is what actually caught the bug, confirmed with a real
+// baked-/AP fixture no other test in this file uses (see
+// writeMinimalPDFWithBakedAPHighlight's own doc comment for why that gap
+// in fixtures is exactly how this went unnoticed) — the fresh reload
+// render must show the NEW color's RGB dominating, not the original.
+func TestSaveHighlights_ColorChangeOnBakedAPHighlightSurvivesRealSave(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.pdf")
+	writeMinimalPDFWithBakedAPHighlight(t, path)
+
+	doc, err := Prepare(path)
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if len(doc.Highlights) != 1 {
+		t.Fatalf("expected 1 highlight, got %d", len(doc.Highlights))
+	}
+	h := doc.Highlights[0]
+	if h.ObjNr <= 0 {
+		t.Fatalf("expected a real ObjNr (baked /AP annotation), got %d", h.ObjNr)
+	}
+
+	initialImg, err := doc.RenderPage(1, 4.0)
+	if err != nil {
+		t.Fatalf("RenderPage initial: %v", err)
+	}
+	if r, g, b := dominantNonWhiteColor(t, "initial (baked /AP, must win over /C=red)", initialImg); !(b > 200 && r < 50 && g < 50) {
+		t.Fatalf("expected the baked appearance's blue to dominate initially, got r=%d g=%d b=%d", r, g, b)
+	}
+
+	doc.SetHighlightColor(h, [3]float64{0, 1, 0}) // green
+	if err := doc.SaveHighlights(path); err != nil {
+		t.Fatalf("SaveHighlights: %v", err)
+	}
+	doc.Close()
+
+	fresh, err := Prepare(path)
+	if err != nil {
+		t.Fatalf("Prepare after save: %v", err)
+	}
+	defer fresh.Close()
+	if len(fresh.Highlights) != 1 {
+		t.Fatalf("expected 1 highlight after reload, got %d", len(fresh.Highlights))
+	}
+	if got := fresh.Highlights[0].Color; got != [3]float64{0, 1, 0} {
+		t.Errorf("reloaded Color = %v, want [0 1 0]", got)
+	}
+
+	freshImg, err := fresh.RenderPage(1, 4.0)
+	if err != nil {
+		t.Fatalf("RenderPage after fresh reload: %v", err)
+	}
+	if r, g, b := dominantNonWhiteColor(t, "fresh reload after real Save (must be green, not stale blue)", freshImg); !(g > 200 && r < 50 && b < 50) {
+		t.Fatalf("expected the NEW green color to dominate after a real save+reload, got r=%d g=%d b=%d (stale blue means the bug regressed)", r, g, b)
+	}
+}
+
+// TestSaveHighlights_RecolorForeignPolygonDoesNotDeleteIt guards a real
+// regression found while fixing the bug above: the first version of the
+// delete-and-recreate fix deleted a colorChanged, already-saved
+// highlight's annotation object unconditionally, then called
+// newAnnotationForShape to author its replacement — but
+// newAnnotationForShape's own "Polygon" case returns nil when
+// len(Vertices) < 3, which is ALWAYS true for a Polygon loaded from
+// another app (Vertices is only ever populated for one this app itself
+// just drew — see Highlight.Vertices' own doc comment). That nil silently
+// fell through the "nothing to write" continue in the add-back loop,
+// meaning the polygon was deleted and NEVER re-added — recoloring it
+// didn't just fail to change its color, it deleted it outright. Confirmed
+// as a real, reproducible regression (not hypothetical) with a throwaway
+// test before this fix, deleted after use.
+//
+// Fixed by computing each colorChanged highlight's replacement BEFORE
+// deleting anything, and only deleting (and later re-adding) the ones
+// newAnnotationForShape can actually produce something for — one that
+// can't is left on disk entirely untouched by the delete/recreate scheme
+// (falling back to the old, harmless-but-cosmetic /C-in-place patch via
+// applyPendingHighlightEdits' own recreate-aware fallback).
+func TestSaveHighlights_RecolorForeignPolygonDoesNotDeleteIt(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.pdf")
+	writeMinimalPDF(t, path)
+
+	rect := types.NewRectangle(10, 10, 60, 60)
+	vertices := types.NewNumberArray(10, 10, 60, 10, 35, 60)
+	red := color.SimpleColor{R: 1, G: 0, B: 0}
+	ann := model.NewPolygonAnnotation(*rect, 0, "", "", "", 0, &red, "", nil, nil, "", "",
+		vertices, nil, nil, nil, nil, 1, model.BSSolid, false, 0)
+	if err := api.AddAnnotationsFile(path, path, []string{"1"}, ann, nil, false); err != nil {
+		t.Fatalf("adding test polygon: %v", err)
+	}
+
+	doc, err := Prepare(path)
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if len(doc.Highlights) != 1 {
+		t.Fatalf("expected 1 highlight, got %d", len(doc.Highlights))
+	}
+	h := doc.Highlights[0]
+	if len(h.Vertices) != 0 {
+		t.Fatalf("expected a foreign Polygon to load with no Vertices, got %v", h.Vertices)
+	}
+
+	doc.SetHighlightColor(h, [3]float64{0, 1, 0})
+	if err := doc.SaveHighlights(path); err != nil {
+		t.Fatalf("SaveHighlights: %v", err)
+	}
+	doc.Close()
+
+	fresh, err := Prepare(path)
+	if err != nil {
+		t.Fatalf("Prepare after save: %v", err)
+	}
+	defer fresh.Close()
+	if len(fresh.Highlights) != 1 {
+		t.Fatalf("expected the polygon to survive the recolor, got %d highlights (it vanished — regression)", len(fresh.Highlights))
+	}
+	if fresh.Highlights[0].Kind != "Polygon" {
+		t.Errorf("Kind = %q, want Polygon", fresh.Highlights[0].Kind)
 	}
 }
 
@@ -583,31 +1010,47 @@ func TestRemoveAnnotationsRepairingIfNeeded_RecoversFromDanglingReference(t *tes
 // SaveHighlights' own doc comment on why an untouched dict must stay
 // byte-for-byte untouched, not just value-equal after a round trip.
 func TestHighlightDictChanges(t *testing.T) {
-	base := &Highlight{Kind: "Highlight", Contents: "same", Color: [3]float64{1, 0, 0}}
-	base.origContents, base.origColor = base.Contents, base.Color
+	// "Square" rather than "Highlight" as the base kind: hasLineWidth
+	// (unlike hasPaintedColor) excludes every paintableMarkupKinds member,
+	// so a lineWidthChanged case needs a kind that's both.
+	base := &Highlight{Kind: "Square", Contents: "same", Color: [3]float64{1, 0, 0}, LineWidth: 1}
+	base.origContents, base.origColor, base.origLineWidth = base.Contents, base.Color, base.LineWidth
 
-	if c, col := highlightDictChanges(base); c || col {
-		t.Errorf("expected no changes for an untouched highlight, got contentsChanged=%v colorChanged=%v", c, col)
+	if c, col, lw, g := highlightDictChanges(base); c || col || lw || g {
+		t.Errorf("expected no changes for an untouched highlight, got contentsChanged=%v colorChanged=%v lineWidthChanged=%v geometryChanged=%v", c, col, lw, g)
 	}
 
 	withNewCaption := *base
 	withNewCaption.Contents = "different"
-	if c, col := highlightDictChanges(&withNewCaption); !c || col {
-		t.Errorf("expected only contentsChanged for a caption edit, got contentsChanged=%v colorChanged=%v", c, col)
+	if c, col, lw, g := highlightDictChanges(&withNewCaption); !c || col || lw || g {
+		t.Errorf("expected only contentsChanged for a caption edit, got contentsChanged=%v colorChanged=%v lineWidthChanged=%v geometryChanged=%v", c, col, lw, g)
 	}
 
 	withNewColor := *base
 	withNewColor.Color = [3]float64{0, 1, 0}
-	if c, col := highlightDictChanges(&withNewColor); c || !col {
-		t.Errorf("expected only colorChanged for a color edit, got contentsChanged=%v colorChanged=%v", c, col)
+	if c, col, lw, g := highlightDictChanges(&withNewColor); c || !col || lw || g {
+		t.Errorf("expected only colorChanged for a color edit, got contentsChanged=%v colorChanged=%v lineWidthChanged=%v geometryChanged=%v", c, col, lw, g)
 	}
 
-	// Note isn't a hasPaintedColor kind, so a Color/origColor mismatch on
-	// one must never report colorChanged=true — its Color is meaningless
-	// (Go zero value, not a real /C) in the first place.
-	noteWithColorDrift := &Highlight{Kind: "Note", Color: [3]float64{1, 1, 1}}
-	if _, col := highlightDictChanges(noteWithColorDrift); col {
-		t.Errorf("expected colorChanged=false for Note even with a Color/origColor mismatch, got true")
+	withNewLineWidth := *base
+	withNewLineWidth.LineWidth = 5
+	if c, col, lw, g := highlightDictChanges(&withNewLineWidth); c || col || !lw || g {
+		t.Errorf("expected only lineWidthChanged for a line-weight edit, got contentsChanged=%v colorChanged=%v lineWidthChanged=%v geometryChanged=%v", c, col, lw, g)
+	}
+
+	withMovedGeometry := *base
+	withMovedGeometry.geometryMoved = true
+	if c, col, lw, g := highlightDictChanges(&withMovedGeometry); c || col || lw || !g {
+		t.Errorf("expected only geometryChanged for a moved highlight, got contentsChanged=%v colorChanged=%v lineWidthChanged=%v geometryChanged=%v", c, col, lw, g)
+	}
+
+	// Note isn't a hasPaintedColor or hasLineWidth kind, so a Color/
+	// LineWidth drift from their own (zero-value) origColor/origLineWidth
+	// must never report colorChanged/lineWidthChanged=true — both fields
+	// are meaningless (not a real /C or /BS /W) for this kind.
+	noteWithDrift := &Highlight{Kind: "Note", Color: [3]float64{1, 1, 1}, LineWidth: 5}
+	if _, col, lw, _ := highlightDictChanges(noteWithDrift); col || lw {
+		t.Errorf("expected colorChanged=false and lineWidthChanged=false for Note even with Color/LineWidth drift, got colorChanged=%v lineWidthChanged=%v", col, lw)
 	}
 }
 

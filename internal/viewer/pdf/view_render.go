@@ -341,12 +341,15 @@ func (v *view) refreshAllPages() {
 func (v *view) setDrawKind(kind string) {
 	v.drawKind = kind
 	enabled := kind != ""
+	freehand := kind == "Ink" || kind == "PolyLine"
 	if v.currentDrawer != nil {
 		v.currentDrawer.Enabled = enabled
+		v.currentDrawer.FreehandMode = freehand
 	}
 	for _, d := range v.pageDrawers {
 		if d != nil {
 			d.Enabled = enabled
+			d.FreehandMode = freehand
 		}
 	}
 }
@@ -369,23 +372,33 @@ var defaultArrowEndStyle = [2]string{"None", "ClosedArrow"}
 // start/end are the drag's own raw endpoints, not normalized into
 // top-left/bottom-right — Line needs that (an arrow points from start
 // toward end, not toward whichever corner happens to be lower-right);
-// Square/Circle/Highlight don't care about direction, so they derive
-// their own min/max bounds from the same two points.
+// Square/Circle/Highlight/Underline/Strikeout/Squiggly don't care about
+// direction, so they derive their own min/max bounds from the same two
+// points. Underline/Strikeout/Squiggly use the exact same quad-from-
+// rectangle conversion as Highlight (see AddMarkupShape) — only the Kind
+// differs, which is all paintHighlights' existing hand-paint branches for
+// these three (added in 0.5.0 for reading one back from another app's
+// PDF) need to paint them correctly before Save, and all
+// newAnnotationForShape needs to author the right annotation subtype on
+// Save.
 func (v *view) handleHighlightDrawn(page int, start, end fyne.Position, widgetSize fyne.Size) {
 	pageW, pageH, err := v.doc.PageBoundsPt(page)
 	if err != nil {
 		return
 	}
 	switch v.drawKind {
+	case "Underline", "Strikeout", "Squiggly":
+		quad := widgetRectToQuad(rectTopLeft(start, end), rectBottomRight(start, end), widgetSize, pageW, pageH)
+		v.doc.AddMarkupShape(page, v.drawKind, [][8]float64{quad}, v.highlightColor)
 	case "Line":
 		x1, y1 := widgetPointToPDF(start, widgetSize, pageW, pageH)
 		x2, y2 := widgetPointToPDF(end, widgetSize, pageW, pageH)
-		v.doc.AddLineShape(page, []float64{x1, y1, x2, y2}, defaultArrowEndStyle, v.highlightColor)
+		v.doc.AddLineShape(page, []float64{x1, y1, x2, y2}, defaultArrowEndStyle, v.highlightColor, v.lineWidthPt)
 	case "Square", "Circle":
 		x1, y1 := widgetPointToPDF(start, widgetSize, pageW, pageH)
 		x2, y2 := widgetPointToPDF(end, widgetSize, pageW, pageH)
 		rect := [4]float64{min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)}
-		v.doc.AddRectShape(page, v.drawKind, rect, v.highlightColor)
+		v.doc.AddRectShape(page, v.drawKind, rect, v.highlightColor, v.lineWidthPt)
 	case "Star", "Hexagon":
 		x1, y1 := widgetPointToPDF(start, widgetSize, pageW, pageH)
 		x2, y2 := widgetPointToPDF(end, widgetSize, pageW, pageH)
@@ -395,7 +408,7 @@ func (v *view) handleHighlightDrawn(page int, start, end fyne.Position, widgetSi
 		if v.drawKind == "Star" {
 			vertices = starVertices(cx, cy, rx, ry)
 		}
-		v.doc.AddPolygonShape(page, vertices, v.highlightColor)
+		v.doc.AddPolygonShape(page, vertices, v.highlightColor, v.lineWidthPt)
 	case "Text", "Speech Bubble":
 		// Unlike every other kind, this one needs a caption before
 		// there's anything to add at all — promptForShapeText creates
@@ -411,6 +424,34 @@ func (v *view) handleHighlightDrawn(page int, start, end fyne.Position, widgetSi
 	default: // "Highlight", and the fallback for any unrecognized drawKind
 		quad := widgetRectToQuad(rectTopLeft(start, end), rectBottomRight(start, end), widgetSize, pageW, pageH)
 		v.doc.AddHighlight(page, [][8]float64{quad}, v.highlightColor, "")
+	}
+	v.highlights.refreshList()
+	v.repaintPage(page)
+}
+
+// handleFreehandDrawn is every highlightDrawer.OnFreehandDrawn's target —
+// the Ink/PolyLine counterpart of handleHighlightDrawn: converts every
+// sampled widget-space point along the drag into PDF space, in order, and
+// adds the result as a new in-memory stroke (AddInkShape or
+// AddPolyLineShape, picked by v.drawKind — both kinds use this exact same
+// freehand capture, see AddPolyLineShape's own doc comment for why
+// PolyLine isn't yet a real click-vertex-then-finish tool), then makes it
+// visible immediately the same way every other newly-drawn shape already
+// does.
+func (v *view) handleFreehandDrawn(page int, points []fyne.Position, widgetSize fyne.Size) {
+	pageW, pageH, err := v.doc.PageBoundsPt(page)
+	if err != nil {
+		return
+	}
+	pdfPoints := make([][2]float64, len(points))
+	for i, p := range points {
+		x, y := widgetPointToPDF(p, widgetSize, pageW, pageH)
+		pdfPoints[i] = [2]float64{x, y}
+	}
+	if v.drawKind == "PolyLine" {
+		v.doc.AddPolyLineShape(page, pdfPoints, v.highlightColor, v.lineWidthPt)
+	} else {
+		v.doc.AddInkShape(page, pdfPoints, v.highlightColor, v.lineWidthPt)
 	}
 	v.highlights.refreshList()
 	v.repaintPage(page)
@@ -543,6 +584,59 @@ func (v *view) handleHighlightTapped(page int, pos fyne.Position, widgetSize fyn
 	}
 }
 
+// handleHighlightMoveHitTest is every highlightDrawer.HitTestSelected's
+// target: reports whether pos lands on the CURRENTLY SELECTED highlight
+// specifically (not just any highlight — the same "select it first, then
+// drag it" two-step most editors use, so dragging near a different,
+// unselected shape never accidentally moves the wrong one), and if so its
+// own bounding box in this same widget-local space, for the live ghost
+// overlay while dragging. Mirrors handleHighlightTapped's own hit test,
+// just against one specific highlight instead of "whichever one is
+// topmost here" — and additionally requires canMoveHighlight, so a drag
+// never even begins a move for a kind/geometry combo this app couldn't
+// actually persist on the next Save to PDF (see its own doc comment for
+// why that's not automatic for every already-saved highlight).
+func (v *view) handleHighlightMoveHitTest(page int, pos fyne.Position, widgetSize fyne.Size) (tl, br fyne.Position, ok bool) {
+	h := v.doc.selectedHighlight
+	if h == nil || h.Page != page || !canMoveHighlight(h) {
+		return fyne.Position{}, fyne.Position{}, false
+	}
+	pageW, pageH, err := v.doc.PageBoundsPt(page)
+	if err != nil {
+		return fyne.Position{}, fyne.Position{}, false
+	}
+	x, y := widgetPointToPDF(pos, widgetSize, pageW, pageH)
+	rect, hasRect := highlightBoundsPt(h)
+	if !hasRect || x < rect[0] || x > rect[2] || y < rect[1] || y > rect[3] {
+		return fyne.Position{}, fyne.Position{}, false
+	}
+	tl, br = pdfRectToWidget(rect, widgetSize, pageW, pageH)
+	return tl, br, true
+}
+
+// handleHighlightMoved is every highlightDrawer.OnMoved's target: converts
+// the drag's start/end into a PDF-space delta and applies it to the
+// currently-selected highlight's own geometry (MoveHighlight) — whichever
+// highlight handleHighlightMoveHitTest just confirmed the drag started on,
+// which can only be v.doc.selectedHighlight (see that function's own doc
+// comment on why), re-read here rather than threaded through the gesture
+// since nothing else can change the selection mid-drag.
+func (v *view) handleHighlightMoved(page int, start, end fyne.Position, widgetSize fyne.Size) {
+	h := v.doc.selectedHighlight
+	if h == nil {
+		return
+	}
+	pageW, pageH, err := v.doc.PageBoundsPt(page)
+	if err != nil {
+		return
+	}
+	x1, y1 := widgetPointToPDF(start, widgetSize, pageW, pageH)
+	x2, y2 := widgetPointToPDF(end, widgetSize, pageW, pageH)
+	v.doc.MoveHighlight(h, x2-x1, y2-y1)
+	v.highlights.refreshList()
+	v.repaintPage(page)
+}
+
 // handleHighlightSecondaryTapped is every highlightDrawer.OnTappedSecondary's
 // target: right-click (or long-press) a highlight/shape directly on the
 // page to select it — the exact same hit test and selection as a plain
@@ -560,6 +654,7 @@ func (v *view) handleHighlightSecondaryTapped(page int, pos fyne.Position, widge
 	x, y := widgetPointToPDF(pos, widgetSize, pageW, pageH)
 	h := v.doc.HighlightAt(page, x, y)
 	if h == nil {
+		v.showEmptySpaceContextMenu(page, pos, widgetSize, absolutePos)
 		return
 	}
 	for i, candidate := range v.doc.Highlights {
@@ -571,6 +666,171 @@ func (v *view) handleHighlightSecondaryTapped(page int, pos fyne.Position, widge
 
 	menu := fyne.NewMenu("", fyne.NewMenuItem("Delete", v.highlights.deleteSelected))
 	widget.ShowPopUpMenuAtPosition(menu, v.win.Canvas(), absolutePos)
+}
+
+// rightClickQuickShapeKinds lists every "Draw" kind offered in the
+// right-click "Add Shape" submenu (showEmptySpaceContextMenu) — every kind
+// EXCEPT Highlight (already its own top-level quick action, being by far
+// the most common one) and Ink/PolyLine (freehand-drag-only kinds with no
+// sensible default geometry for a single click to place — there's no
+// "default stroke path" the way there's a default rect or pair of
+// endpoints for everything else). Mirrors view.go's drawOptions kind list
+// exactly, minus those three, so this submenu never drifts out of sync
+// with what the toolbar's own "Draw: ..." dropdown can draw.
+var rightClickQuickShapeKinds = []string{
+	"Underline", "Strikeout", "Squiggly",
+	"Square", "Circle", "Line",
+	"Star", "Hexagon", "Text", "Speech Bubble",
+}
+
+// showEmptySpaceContextMenu is handleHighlightSecondaryTapped's "the
+// right-click hit nothing" branch: offers quick actions to add a bookmark,
+// TOC entry, highlight, or shape right at the clicked spot, rather than
+// requiring the separate paths that already existed (bookmarkPanel's own
+// "Add Bookmark"/"Add TOC Entry" buttons always use the current page/
+// scroll position, not wherever was clicked; drawing a highlight/shape
+// needs the toolbar's "Draw: ..." dropdown set first, then a drag). "Add
+// Shape" is a submenu (fyne.MenuItem.ChildMenu) listing every other
+// placeable kind — added after real hands-on testing of the first version
+// (which only offered Square) asked for the toolbar's own full kind list
+// here too, rather than a second, narrower shape-picking path.
+func (v *view) showEmptySpaceContextMenu(page int, pos fyne.Position, widgetSize fyne.Size, absolutePos fyne.Position) {
+	frac := float32(0)
+	if widgetSize.Height > 0 {
+		frac = pos.Y / widgetSize.Height
+	}
+	if frac < 0 {
+		frac = 0
+	} else if frac > 1 {
+		frac = 1
+	}
+
+	shapeItems := make([]*fyne.MenuItem, len(rightClickQuickShapeKinds))
+	for i, kind := range rightClickQuickShapeKinds {
+		kind := kind // capture per-iteration value for the closure below
+		shapeItems[i] = fyne.NewMenuItem(kind, func() {
+			v.addShapeAt(page, pos, widgetSize, kind)
+		})
+	}
+	addShapeItem := fyne.NewMenuItem("Add Shape", nil)
+	addShapeItem.ChildMenu = fyne.NewMenu("", shapeItems...)
+
+	menu := fyne.NewMenu("",
+		fyne.NewMenuItem("Add Bookmark Here", func() {
+			v.panel.showAddDialogAt(false, page, frac)
+		}),
+		fyne.NewMenuItem("Add TOC Entry Here", func() {
+			v.panel.showAddDialogAt(true, page, frac)
+		}),
+		fyne.NewMenuItem("Add Highlight Here", func() {
+			v.addShapeAt(page, pos, widgetSize, "Highlight")
+		}),
+		addShapeItem,
+	)
+	widget.ShowPopUpMenuAtPosition(menu, v.win.Canvas(), absolutePos)
+}
+
+// Default half-width/half-height (PDF points) for a shape added via
+// showEmptySpaceContextMenu, grouped by rough visual footprint — picked to
+// look like a plausible real-world default (roughly one line of
+// highlighted/underlined text; a modest square/circle/line/star/hexagon; a
+// small text box) without needing a drag to size it, matching the whole
+// point of this shortcut: click and place, no setup.
+const (
+	rightClickMarkupHalfWidthPt  = 70.0
+	rightClickMarkupHalfHeightPt = 9.0
+	rightClickShapeHalfSizePt    = 30.0
+	rightClickTextHalfWidthPt    = 90.0
+	rightClickTextHalfHeightPt   = 30.0
+)
+
+// addShapeAt adds a default-sized annotation of the given kind centered on
+// a right-click's own position (showEmptySpaceContextMenu's "Add
+// Highlight Here"/"Add Shape" submenu actions) — the single-point
+// counterpart of handleHighlightDrawn, which every one of these kinds
+// already knows how to construct from a drag's two corners/endpoints; this
+// just derives those same two points from one click plus a kind-dependent
+// default size instead. Reuses the exact same Add*Shape calls
+// handleHighlightDrawn does, so authoring/hand-paint/Save behavior for a
+// shape added this way is identical to one drawn by hand.
+func (v *view) addShapeAt(page int, pos fyne.Position, widgetSize fyne.Size, kind string) {
+	pageW, pageH, err := v.doc.PageBoundsPt(page)
+	if err != nil {
+		return
+	}
+	cx, cy := widgetPointToPDF(pos, widgetSize, pageW, pageH)
+
+	halfW, halfH := rightClickShapeHalfSizePt, rightClickShapeHalfSizePt
+	switch kind {
+	case "Highlight", "Underline", "Strikeout", "Squiggly":
+		halfW, halfH = rightClickMarkupHalfWidthPt, rightClickMarkupHalfHeightPt
+	case "Text", "Speech Bubble":
+		halfW, halfH = rightClickTextHalfWidthPt, rightClickTextHalfHeightPt
+	}
+	rect := centeredRectClamped(cx, cy, halfW, halfH, pageW, pageH)
+	x1, y1, x2, y2 := rect[0], rect[1], rect[2], rect[3]
+
+	switch kind {
+	case "Underline", "Strikeout", "Squiggly":
+		quad := [8]float64{x1, y2, x2, y2, x1, y1, x2, y1}
+		v.doc.AddMarkupShape(page, kind, [][8]float64{quad}, v.highlightColor)
+	case "Line":
+		v.doc.AddLineShape(page, []float64{x1, y1, x2, y2}, defaultArrowEndStyle, v.highlightColor, v.lineWidthPt)
+	case "Square", "Circle":
+		v.doc.AddRectShape(page, kind, rect, v.highlightColor, v.lineWidthPt)
+	case "Star", "Hexagon":
+		rx, ry := (x2-x1)/2, (y2-y1)/2
+		vertices := hexagonVertices(cx, cy, rx, ry)
+		if kind == "Star" {
+			vertices = starVertices(cx, cy, rx, ry)
+		}
+		v.doc.AddPolygonShape(page, vertices, v.highlightColor, v.lineWidthPt)
+	case "Text", "Speech Bubble":
+		// Unlike every other kind, creation itself waits for the user to
+		// confirm a caption (see handleHighlightDrawn's own identical
+		// case) — promptForShapeText does its own refreshList/repaintPage
+		// on confirm, so return here rather than falling through to the
+		// unconditional refresh/repaint below.
+		v.promptForShapeText(page, rect, kind == "Speech Bubble")
+		return
+	default: // "Highlight"
+		quad := [8]float64{x1, y2, x2, y2, x1, y1, x2, y1}
+		v.doc.AddHighlight(page, [][8]float64{quad}, v.highlightColor, "")
+	}
+	v.highlights.refreshList()
+	v.repaintPage(page)
+}
+
+// centeredRectClamped builds a PDF-space rectangle of the given half-width/
+// half-height centered at (cx, cy), shifted (not cropped) to stay fully
+// within [0, pageW] x [0, pageH] — so a shape added near a page's edge or
+// corner keeps its full intended size instead of being silently shrunk.
+func centeredRectClamped(cx, cy, halfW, halfH, pageW, pageH float64) [4]float64 {
+	x0, y0 := cx-halfW, cy-halfH
+	x1, y1 := cx+halfW, cy+halfH
+	if x0 < 0 {
+		x1 -= x0
+		x0 = 0
+	}
+	if y0 < 0 {
+		y1 -= y0
+		y0 = 0
+	}
+	if x1 > pageW {
+		x0 -= x1 - pageW
+		x1 = pageW
+	}
+	if y1 > pageH {
+		y0 -= y1 - pageH
+		y1 = pageH
+	}
+	if x0 < 0 {
+		x0 = 0
+	}
+	if y0 < 0 {
+		y0 = 0
+	}
+	return [4]float64{x0, y0, x1, y1}
 }
 
 func (v *view) applyFitWidth(imgW, imgH int) {
@@ -721,6 +981,7 @@ func (v *view) buildContinuousPages() {
 		page := i + 1
 		drawer := newHighlightDrawer(img)
 		drawer.Enabled = v.drawKind != ""
+		drawer.FreehandMode = v.drawKind == "Ink" || v.drawKind == "PolyLine"
 		drawer.OnDrawn = func(start, end fyne.Position, size fyne.Size) {
 			v.handleHighlightDrawn(page, start, end, size)
 		}
@@ -729,6 +990,15 @@ func (v *view) buildContinuousPages() {
 		}
 		drawer.OnTappedSecondary = func(pos fyne.Position, size fyne.Size, absPos fyne.Position) {
 			v.handleHighlightSecondaryTapped(page, pos, size, absPos)
+		}
+		drawer.HitTestSelected = func(pos fyne.Position, size fyne.Size) (fyne.Position, fyne.Position, bool) {
+			return v.handleHighlightMoveHitTest(page, pos, size)
+		}
+		drawer.OnMoved = func(start, end fyne.Position, size fyne.Size) {
+			v.handleHighlightMoved(page, start, end, size)
+		}
+		drawer.OnFreehandDrawn = func(points []fyne.Position, size fyne.Size) {
+			v.handleFreehandDrawn(page, points, size)
 		}
 		v.pageDrawers[i] = drawer
 		objs[i] = drawer

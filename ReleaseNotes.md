@@ -3,96 +3,93 @@
 ## Windows, Linux and MacOS multi-format document reader/viewer
 
 ## Future ideas:
-- **Priority for the next version**: preserve a region bookmark's exact
-  scroll position on save, not just its page — confirmed via real
-  hands-on testing (0.6.0) that it works perfectly for as long as the
-  tab stays open (even across Save to PDF), but degrades to a plain
-  page bookmark the moment the file is actually re-parsed from disk
-  (close/reopen the tab, or relaunch the app), because nothing in the
-  PDF bytes carries the position — it only ever lived in this app's own
-  in-memory `Bookmark.YOffset`. Worth fixing properly rather than
-  leaving as a known gap: without it, there's genuinely no reason to
-  prefer a region bookmark over a plain page one once the file is
-  closed, which defeats the point of having them at all. **Concrete
-  starting point, not yet verified**: PDF's own outline-entry
-  destination syntax natively supports more than a bare page number — a
-  `/XYZ` destination is `[page /XYZ left top zoom]`, an exact position,
-  no custom/non-standard extension needed. The prior note here ("no
-  position field") may have only been true of whichever simplified
-  bookmark-adding API this app's `bookmarks.go` currently calls into
-  (`pdfcpu.Bookmark`/`AddBookmarks` or similar) — check whether pdfcpu's
-  own lower-level destination/outline types (`model`/`types` packages)
-  can write a real `/XYZ` array directly, bypassing the simplified
-  helper if it only ever emits a page-only destination. If pdfcpu
-  genuinely has no way to write one at all, the fallback is pdfcpu's own
-  raw dict-mutation escape hatch already used elsewhere in this app for
-  gaps like this (see `highlightGeometry`'s own re-dereference-by-
-  `ObjNr` technique in CLAUDE.md) — write the `/Dest` array by hand onto
-  the outline object pdfcpu already creates.
-- Real PDF text search, phased: Phase 1 (document-wide match count and
-  true next/prev-occurrence stepping) shipped in 0.6.0; Phase 2 (an
-  approximate on-page highlight box for the current match) also shipped
-  in 0.6.0 — see its own NEW entry below. Not pixel-perfect like
-  Preview's own box: go-fitz's text extraction still has no character/
-  word coordinate API, so the box's horizontal position/width is
-  estimated from the matched line's own font size rather than looked up
-  exactly. Real hands-on testing on a multi-column PDF found this
-  estimate can occasionally land in the wrong column entirely on a long
-  line (not just be imprecise within the right one); recalibrated once
-  against two confirmed real cases (see CLAUDE.md) with a real
-  improvement. The box is also padded wider than the raw estimate
-  (more on the left, per direct user feedback) so small residual
-  drift still visually lands on the word rather than beside it — helps
-  most real cases, though a line with an unusually narrow-character-
-  heavy prefix can still land a little off. Still an estimate, not
-  exact character positions. A truly exact box would still need the
-  same go-fitz cgo-binding extension the item below (real text-snapped
-  highlight drawing) is blocked on — worth
-  doing together if ever attempted.
-- Draw Underline/Strikeout/Squiggly ourselves, the same way "Draw"
-  (highlight_draw.go, wired into view.go's toolbar) already lets a user
-  add a brand-new Highlight/Square/Circle/Line/Polygon/FreeText annotation
-  by dragging on the page (0.6.0 extended the original Highlight-only
-  tool to all of those). Painting one, once drawn, is no longer the hard
-  part — see 0.5.0's "real MuPDF annotation rendering" note below: any
-  annotation actually saved into the PDF now renders correctly with zero
-  extra painting code, whatever its kind. What's still missing is
-  authoring: a model.New{Underline,StrikeOut,Squiggly}Annotation case in
-  newAnnotationForShape (highlight_edit.go) alongside the existing ones,
-  plus a hand-paint preview branch in paintHighlights for the not-yet-
-  saved case (Underline/Strikeout already have one for reading an
-  existing annotation back — see 0.5.0 — Squiggly too; the "draw a brand
-  new one" wiring is the only piece missing).
-- Move an existing highlight/shape, and edit one already on the page (not
-  just recolor it, or draw a new one — 0.6.0's Add covers drawing NEW
-  shapes, not touching existing ones): repositioning would mean rewriting
-  each kind's own geometry (`/Rect` plus whatever else that kind stores —
-  `/L` for Line, `/QuadPoints` for markup, `/Vertices` for Polygon) and,
-  for anything with a baked `/AP` appearance stream, regenerating that
-  stream too — a bare geometry update alone won't move what's actually
-  painted, the same class of gap the 0.5.0 color-change fix (below) had
-  to work around for recoloring, but for a real Save this time, not just
-  a scratch preview. Also needs new interactive UI (resize handles,
-  drag-to-move) beyond what click-to-select already has. A genuinely
-  bigger effort than Add turned out to be — deliberately scoped out of
-  0.6.0 for its own dedicated pass. Preview's own drag-the-midpoint
-  arrow-curving trick belongs here too, once this exists: matching
-  whatever non-standard representation Preview uses for an "edited"
-  shape, reverse-engineered from a real file the way the Line/arrow
-  geometry work above already was once. A speech bubble's callout tail
-  currently lands at a fixed offset (see AddTextShape/calloutTipFor) —
-  aiming it precisely also belongs here, not in initial drawing.
-- Ink/PolyLine/Stamp/Caret — the annotation kinds this app still can't
-  author itself (Highlight/Square/Circle/Line/Polygon(Star,Hexagon)/
-  FreeText(text block, speech bubble) can, as of 0.6.0) — no longer need
-  their own geometry parsing to RENDER correctly (see 0.5.0's "real MuPDF
-  annotation rendering" note: MuPDF renders any of them correctly,
-  generically, the moment they're actually saved into the file), and
-  already support listing/click-select/delete via a generic `/Rect`-based
-  bounding box (0.5.0). Authoring one is a bigger lift than what's shipped
-  so far: Ink/PolyLine need a multi-point or freehand drawing gesture (not
-  a single rectangle drag), and Stamp has no fixed geometry to author
-  against at all (arbitrary vector art).
+- **Deliberate pause point before 0.8.0**: with the right-click context
+  menu and remembered color/line-weight defaults now shipped (see 0.7.0's
+  own NEW entries), the next priority — resize an existing shape (see the
+  item right below) — was explicitly deferred rather than squeezed into
+  the same release, per direct user preference: it needs real new
+  interactive UI (resize handles, per-kind resize semantics) rather than
+  reusing existing plumbing the way the context menu did, and deserves its
+  own focused pass. Plan going into 0.8.0: more hands-on testing of
+  everything above, commit, and release 0.7.0 as-is before picking resize
+  back up. Stamp/Caret authoring and a real click-vertex PolyLine tool
+  (see their own items below) remain explicitly deferred too — Change
+  Color/Change Line Weight/Move already cover most of what "edit an
+  existing shape" meant in practice, per direct user feedback.
+- Resize an already-placed highlight/shape (drag-to-MOVE one shipped in
+  0.7.0 — see its own NEW entry — this is the "and resize" half that
+  didn't). Needs real interactive UI (resize handles at corners/edges,
+  presumably) beyond what click-to-select/move already has, and, for an
+  already-saved shape, the exact same delete-and-reauthor-via-
+  newAnnotationForShape mechanism Move already uses (MoveHighlight/
+  canMoveHighlight in highlight_edit.go) — a bare geometry rewrite alone
+  still wouldn't move what's actually painted for anything with a baked
+  `/AP`, the same reasoning that already applied to Move and, before it,
+  recoloring (see 0.5.0 and 0.7.0's own notes). Preview's own
+  drag-the-midpoint arrow-curving trick belongs here too, once this
+  exists: matching whatever non-standard representation Preview uses for
+  an "edited" shape, reverse-engineered from a real file the way the
+  Line/arrow geometry work elsewhere in this file already was once. A
+  speech bubble's callout tail currently lands at a fixed offset (see
+  AddTextShape/calloutTipFor) — aiming it precisely also belongs here,
+  not in initial drawing.
+- A real click-vertex-then-finish PolyLine tool — click to place each
+  vertex, then some way to finish (double-click, Enter, Escape, or
+  clicking back near the start) — rather than today's PolyLine (0.7.0),
+  which deliberately reuses Ink's own freehand-drag capture verbatim
+  (every sampled point along a single continuous drag), saved under PDF's
+  distinct `/PolyLine` subtype instead of `/Ink`. That was a deliberate,
+  explicit scope choice (confirmed with the user rather than assumed):
+  a real multi-click vertex tool needs genuinely new interaction state (an
+  in-progress vertex list spanning multiple discrete clicks, some way to
+  show it mid-construction, and a finish/cancel gesture that doesn't
+  collide with existing click-to-select) — a bigger, separate effort than
+  anything else in this "additional shape work" push, while the freehand
+  version shipped using already-built, already-tested infrastructure.
+  Worth it if a real "connect the dots" PolyLine (deliberate straight
+  segments, not a dense freehand sample) is ever specifically wanted.
+- Stamp/Caret — the other annotation kinds this app still can't author
+  itself (Highlight/Square/Circle/Line/Polygon(Star,Hexagon)/FreeText(text
+  block, speech bubble)/Ink/PolyLine can, as of 0.7.0 — see their own NEW
+  entries) — no longer need their own geometry parsing to RENDER correctly
+  (see 0.5.0's "real MuPDF annotation rendering" note: MuPDF renders any
+  of them correctly, generically, the moment they're actually saved into
+  the file), and already support listing/click-select/delete via a
+  generic `/Rect`-based bounding box (0.5.0). Stamp has no fixed geometry
+  to author against at all (arbitrary vector art). Confirmed via real
+  hands-on testing (0.7.0's Move feature) that Stamp specifically is also
+  why a real Preview "Shapes" tool annotation — star, hexagon, speech
+  bubble, magnifier/loupe, all apparently authored by Preview as Stamp
+  regardless of their visual appearance — can't be dragged to a new
+  position at all (`canMoveHighlight` correctly refuses rather than
+  risking the same delete-with-nothing-to-put-back regression recoloring
+  a foreign Polygon once had). Unlike Ink/PolyLine/Caret (Ink and
+  PolyLine's own Move now confirmed working, 0.7.0), this isn't something
+  authoring support would ever fix
+  for MOVING an existing one specifically: Stamp's arbitrary vector art
+  has no coordinate model to translate and rewrite,
+  so an already-saved foreign Stamp is permanently non-movable by this
+  app, not just not-yet-supported.
+- Adjustable text size for Text block/Speech Bubble annotations — found
+  worth asking for via real hands-on testing of the right-click "Add
+  Shape" submenu's Speech Bubble option: color is already changeable
+  (Change Color already covers FreeText, see 0.6.0), but the text itself
+  is always drawn at a fixed size, with no way to make it bigger. No font
+  picker intended (noted explicitly as a "maybe someday, some might like
+  it" non-goal, not scoped here) — just a single sensible font at a
+  choice of sizes. Should follow the same pattern Line Weight already
+  established (`lineWeightPresets`/`lineWeightOptions` in
+  highlight_lineweight.go): a closed preset list (something like
+  10/12/14/18/24pt), not a free-form 1-128 numeric entry a mis-typed value
+  could turn into an unreadably tiny or absurdly oversized annotation —
+  explicitly requested this way rather than an open range. Both halves
+  already have a slot ready: `model.NewFreeTextAnnotation`'s own
+  `fontSize int` parameter (currently always passed as `0`, i.e. MuPDF's
+  default, in `newAnnotationForShape`'s FreeText case) for the real saved
+  annotation, and `text_shape.go`'s `basicfont.Face7x13`-based
+  `drawWrappedText`/`wrapText` for the in-app hand-paint preview (would
+  need a way to scale a fixed bitmap font, or swap to a scalable one, to
+  actually honor a chosen size there).
 - A plain text block still shows a visible border, unlike Preview's own
   borderless "Text" tool — tried making it borderless (both in the
   preview and the real saved annotation) and reverted: MuPDF's own
@@ -102,6 +99,19 @@
   baking a custom appearance stream with no border path in it at all —
   real content-stream + font-resource authoring, a bigger effort than a
   border-width parameter, not attempted yet.
+- Draw Ink/PolyLine's own live preview is only the same bounding-box
+  rectangle every other "Draw" kind shows while dragging (highlightDrawer's
+  single overlay rectangle, reused rather than building a new
+  live-rendering path — see CLAUDE.md's own Ink section) — confirmed via
+  real hands-on testing to work, but "a little confusing at first," since
+  for every OTHER kind that rectangle is a reasonable preview of the final
+  shape, while for a freehand stroke it has nothing to do with the actual
+  line being drawn. A real point-by-point live trace (the overlay
+  following the pen tip exactly, not just its bounding box) would need
+  either several `canvas.Line` segments added/extended per `Dragged` call
+  or a small custom `fyne.CanvasObject` that redraws its own path — real
+  UI work, not attempted yet since the plain rectangle already confirmed
+  functional.
 - Real text-snapped highlight drawing, like Preview/Acrobat's "select text
   → highlight" — today's "Draw Highlight" (see Version 0.4.0) is a free
   hand-drawn rectangle, not snapped to text, because go-fitz has no word/
@@ -112,10 +122,140 @@
   handleHighlightDrawn's geometry math would need to change for this, not
   the panel/save plumbing (AddHighlight/SaveHighlights don't care how a
   quad was produced).
+- Real PDF text search, phased: Phase 1 (document-wide match count and
+  true next/prev-occurrence stepping) shipped in 0.6.0; Phase 2 (an
+  approximate on-page highlight box for the current match) also shipped
+  in 0.6.0 — see its own NEW entry under that version. Not pixel-perfect
+  like Preview's own box: go-fitz's text extraction still has no
+  character/word coordinate API, so the box's horizontal position/width
+  is estimated from the matched line's own font size rather than looked
+  up exactly. Real hands-on testing on a multi-column PDF found this
+  estimate can occasionally land in the wrong column entirely on a long
+  line (not just be imprecise within the right one); recalibrated once
+  against two confirmed real cases (see CLAUDE.md) with a real
+  improvement. The box is also padded wider than the raw estimate (more
+  on the left, per direct user feedback) so small residual drift still
+  visually lands on the word rather than beside it — helps most real
+  cases, though a line with an unusually narrow-character-heavy prefix
+  can still land a little off. Still an estimate, not exact character
+  positions. A truly exact box would still need the same go-fitz
+  cgo-binding extension the item above (real text-snapped highlight
+  drawing) is blocked on — worth doing together if ever attempted. Per
+  direct user preference, the shape-work items above this take
+  precedence over picking this back up.
 - Maybe a bigger effort - similar to Mac Preview ability to show pdf page thumbnails to make finding test, highlights, shapes etc easier?
 - A visible highlight box for Text/Markdown find matches (Fyne's Entry/
   RichText widgets have no public API for painting a selection from code)
 
+
+## Version 0.7.0 - October 01, 2026
+
+### ✨ NEW
+
+- The toolbar's highlight color and line weight pickers now remember your
+  last choice across app launches, instead of always resetting to yellow
+  and 1pt — pick a color/weight once and every new shape you draw, in this
+  session or the next, starts from it.
+- Right-click empty space on a page for a quick "Add Bookmark Here"/"Add
+  TOC Entry Here"/"Add Highlight Here"/"Add Shape" menu, right where you
+  clicked — faster than the separate paths these already had (the
+  Bookmarks/TOC panel's own "Add" button always uses the current page and
+  scroll position, not wherever you clicked; adding a highlight or shape
+  needed the toolbar's "Draw: ..." dropdown set first, then a drag). "Add
+  Shape" opens a submenu with every other placeable kind the toolbar's own
+  "Draw: ..." dropdown offers (Underline, Strikeout, Squiggly, Square,
+  Circle, Line, Star, Hexagon, Text, Speech Bubble — Ink/PolyLine aren't
+  offered here since they're freehand strokes with no sensible default
+  shape for a single click to place). Every option uses your current
+  color/line-weight pickers and a sensible default size — a quick way to
+  drop one in without switching the toolbar into Draw mode first.
+- A region bookmark's exact scroll position now survives a real save and
+  reload — not just for as long as the tab stays open, which is as far as
+  0.6.0 got. Previously the position only ever lived in memory
+  (`Bookmark.YOffset`), so closing and reopening the file (or relaunching
+  the app) silently degraded a region bookmark to a plain page one, the
+  moment it had to be re-read from the PDF's own bytes. Now written as a
+  real `/XYZ` destination (page, left, top, zoom — PDF's own standard
+  exact-position outline destination, not a custom extension), so other
+  PDF viewers that understand `/XYZ` destinations (which is most of them)
+  will also jump to the right spot, not just this app.
+- Draw new Underline, Strikeout, and Squiggly annotations directly on the
+  page, the same "Draw: ..." dropdown and click-drag gesture as every
+  other shape. Previews live before Save to PDF (the same hand-paint
+  routines 0.5.0 already added for reading one of these back from another
+  app's PDF), and reads back correctly in Preview/Acrobat/any other real
+  PDF viewer once saved.
+- Move an already-placed highlight/shape: with Draw mode off, drag a
+  selected shape (one this app can draw itself — Highlight/Underline/
+  Strikeout/Squiggly/Square/Circle/Line/Polygon/FreeText/Ink/PolyLine, the
+  last two added later this same version) directly on the page to
+  reposition it, the same click-and-drag as everywhere else in this app.
+  Works whether it was just drawn in this session or loaded from another
+  app's PDF, and whether or not it's been saved yet; a shape this app
+  can't fully reconstruct (e.g. a Polygon from another app with no
+  recorded vertices) can't be dragged at all, rather than silently losing
+  its real shape on the next save. Resizing isn't supported yet — see
+  Future ideas.
+- Draw Ink: a new "Draw: Ink" option traces your actual freehand drag as
+  a single pen stroke, not a rectangle — the first "Draw" kind that isn't
+  a drag-out-a-shape gesture. Previews live before Save to PDF, reads
+  back correctly in Preview/Acrobat/any other real PDF viewer once saved,
+  and — like every shape this app can draw itself — can be recolored and
+  moved afterward too.
+- Draw PolyLine: a new "Draw: PolyLine" option, right alongside Ink and
+  using the exact same freehand-drag capture — saved under PDF's own
+  distinct `/PolyLine` subtype instead of `/Ink`. Not (yet) a real
+  click-a-vertex-at-a-time tool — see Future ideas.
+- Line weight: pick a stroke/border width from a new dropdown next to the
+  color swatch before drawing a Square, Circle, Line, Polygon, Ink, or
+  PolyLine, and change it afterward via the Highlights panel's new
+  "Change Line Weight" button — the same before/after pairing Change
+  Color already had. Persists through Save to PDF and reopening, for a
+  shape drawn in this app or loaded from another one.
+
+### 🐛 FIXED
+
+- Recoloring (or moving) an Ink/PolyLine stroke or a Star/Hexagon/speech
+  bubble shape right after Save to PDF — even in the same session, no
+  reopen needed — turned it into a plain rectangle instead. Any save at
+  all was silently discarding the real shape data for every one of these,
+  because this app has no way to read that data back out of the PDF it
+  just wrote (a PDF limitation, not something this app can fix), and
+  Save to PDF was fully re-reading the file afterward rather than keeping
+  what it already had in memory. Save to PDF now keeps that data across
+  a save instead of discarding and trying to re-read it.
+- Recoloring one of this app's own shapes (Square/Circle/Polygon/
+  FreeText/Ink), saving, and reopening the file could show the shape's
+  color as black in the Highlights panel even though the saved file's own
+  color was correct and the page rendered correctly — the in-memory
+  record of a shape's own color was never actually being read back on
+  reload for any of these kinds, only for Highlight/Underline/Strikeout/
+  Squiggly/Line.
+- Change Color on a highlight/shape originally made by another app
+  (Preview, Acrobat, ...) looked like it worked — the page updated
+  immediately — but reopening the file afterward (even back in this same
+  app) silently reverted to the original color. Save to PDF was only ever
+  rewriting the annotation's `/C` entry, but a real PDF viewer always
+  prefers an annotation's own baked appearance over `/C` when one exists,
+  and every annotation another app creates has one; this app's own
+  freshly-drawn shapes never did, which is why this never showed up
+  testing with those. Save to PDF now replaces a recolored annotation
+  outright with a freshly-authored one in the new color, the same
+  approach already used for making a just-drawn shape's own color show up
+  immediately.
+- Changing Line Weight on an already-saved Ink or PolyLine stroke made it
+  visually disappear and show as a plain rectangle instead, until Save to
+  PDF, close, and reopen — even though nothing was actually lost (the
+  real shape was always there once reopened). This app has no way to
+  read an existing Ink/PolyLine's exact path back out of a saved PDF, so
+  recoloring/reweighting one of these always had to delete-and-replace it
+  for the live preview to update, and had nothing but a plain box to put
+  back with. Changing Line Weight (or Color) on one of these now simply
+  leaves the existing shape's old-but-correctly-shaped appearance on
+  screen — with the real new weight/color still saved for real once you
+  Save to PDF — and shows a brief, auto-closing notice that the visible
+  update is pending until then, rather than replacing it with a
+  misleading box.
 
 ## Version 0.6.0 - September 30, 2026
 

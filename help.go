@@ -83,16 +83,25 @@ PDF VIEWING:
   kind (Highlight, Underline, Strikeout, Squiggly, Line/arrow, Square,
   Circle, Polygon, FreeText, Stamp, Ink, and more).
 • Draw: pick a kind from the toolbar's "Draw: ..." dropdown (Highlight,
-  Square, Circle, Line, Star, Hexagon, Text, Speech Bubble), then drag on
-  the page to add it. Text and Speech Bubble prompt for the caption right
-  after the drag; Line draws as an arrow from where you start dragging to
-  where you release.
+  Underline, Strikeout, Squiggly, Square, Circle, Line, Star, Hexagon,
+  Text, Speech Bubble, Ink, PolyLine), pick a line weight from the
+  dropdown next to it (Square/Circle/Line/Polygon/Ink/PolyLine only —
+  meaningless for the others), then drag on the page to add it. Text and
+  Speech Bubble prompt for the caption right after the drag; Line draws as
+  an arrow from where you start dragging to where you release; Ink and
+  PolyLine both trace your actual freehand drag as a single pen stroke,
+  not a rectangle (the live preview while dragging is still just a
+  bounding-box rectangle, same as every other kind — the real stroke only
+  appears once you release).
 • Select and edit: click any highlight/shape directly on the page, or pick
   it from the panel's own list, to select it — shown with a blue outline.
   "Change Color" recolors it (for the kinds this app can draw itself);
-  Delete/Backspace (or the panel's "Delete Selected" button) removes it;
-  Escape, or clicking empty page space, deselects without changing
-  anything. Moving or resizing an existing shape isn't supported yet.
+  "Change Line Weight" adjusts its stroke width (Square/Circle/Line/
+  Polygon/Ink/PolyLine only); Delete/Backspace (or the panel's "Delete
+  Selected" button) removes it; Escape, or clicking empty page space,
+  deselects without changing anything. With Draw mode off, drag a selected
+  shape (one this app can draw itself) directly on the page to reposition
+  it — resizing isn't supported yet.
 • Save to PDF: writes your changes back — overwrite the original, or "Save
   as a new file..." (the tab then follows the new file). Real edits to the
   PDF's own annotations, so other readers (Preview, Acrobat, ...) see them

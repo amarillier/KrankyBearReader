@@ -38,7 +38,12 @@ const textShapePaddingPx = 4
 // rendering takes over) would be a worse, more confusing inconsistency
 // than just not matching Preview's own style at all.
 func drawFreeTextPreview(img *image.RGBA, r image.Rectangle, h *Highlight, pageHeightPt, scale float64, col color.NRGBA) {
-	strokePx := float64(defaultShapeStrokeWidthPx(scale))
+	// Always defaultShapeBorderWidthPt, never h.LineWidth — FreeText is
+	// deliberately excluded from hasLineWidth (see its own doc comment):
+	// MuPDF ignores /BS's width for a FreeText with no baked /AP
+	// regardless of value, so a configurable width here would silently
+	// diverge from what Save actually produces.
+	strokePx := float64(shapeStrokeWidthPx(defaultShapeBorderWidthPt, scale))
 	drawRectOutline(img, r, col, int(strokePx))
 	if h.CalloutTip != nil {
 		anchor := [2]float64{float64(r.Min.X), float64(r.Max.Y)} // the box's own bottom-left corner, matching calloutTipFor's own anchor choice
