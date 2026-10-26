@@ -2,6 +2,7 @@ package pdf
 
 import (
 	"fmt"
+	"image/color"
 	"strings"
 
 	"fyne.io/fyne/v2"
@@ -20,7 +21,7 @@ func panelSelectOptions(panelOpen bool) []string {
 	if panelOpen {
 		closedLabel = "Hide Panel"
 	}
-	return []string{closedLabel, "Table of Contents", "Bookmarks", "Highlights and Notes"}
+	return []string{closedLabel, "Table of Contents", "Bookmarks", "Highlights and Notes", "Page Thumbnails"}
 }
 
 // PanelMode selects what the side panel shows.
@@ -31,6 +32,7 @@ const (
 	PanelTOC
 	PanelBookmarks
 	PanelHighlights
+	PanelThumbnails
 )
 
 // displayScale converts a rendered-at-baseRenderDPI pixel size down to an
@@ -102,10 +104,12 @@ type view struct {
 	totalLabel     *widget.Label
 	zoomSelect     *widget.Select
 	panelSelectRef *widget.Select
+	drawSelectRef  *widget.Select // the toolbar's Draw dropdown, so selecting a shape can switch it back to Off
 	statusBar      *widget.Label
 
 	panel       *bookmarkPanel
 	highlights  *highlightsPanel
+	thumbnails  *thumbnailPanel
 	split       *container.Split
 	mainContent *fyne.Container // Stack: split (panel+content) or content alone
 	pdfContent  fyne.CanvasObject
@@ -200,6 +204,7 @@ func (v *view) retargetTo(newPath string) error {
 	v.panel.selected = nil
 	v.panel.tree.UnselectAll()
 	v.panel.rebuildTreeData()
+	v.thumbnails.reset()
 
 	v.totalLabel.SetText(fmt.Sprintf("/ %d", v.doc.PageCount()))
 	if v.currentPage > v.doc.PageCount() {
@@ -223,6 +228,9 @@ func (v *view) retargetTo(newPath string) error {
 // needing a call at every navigation site.
 func (v *view) setCurrentPage(page int) {
 	v.currentPage = page
+	if v.thumbnails != nil && v.panelMode == PanelThumbnails {
+		v.thumbnails.syncSelection(page, true)
+	}
 	if v.onPageChanged != nil {
 		v.onPageChanged(page)
 	}
@@ -253,6 +261,18 @@ func (v *view) build() fyne.CanvasObject {
 	v.currentDrawer.OnMoved = func(start, end fyne.Position, size fyne.Size) {
 		v.handleHighlightMoved(v.currentPage, start, end, size)
 	}
+	v.currentDrawer.HitTestHandle = func(pos fyne.Position, size fyne.Size) (resizeHandle, bool) {
+		return v.handleResizeHitTest(v.currentPage, pos, size)
+	}
+	v.currentDrawer.ResizeGhost = func(hnd resizeHandle, start, cur fyne.Position, size fyne.Size) (fyne.Position, fyne.Position) {
+		return v.handleResizeGhost(v.currentPage, hnd, start, cur, size)
+	}
+	v.currentDrawer.OnResized = func(hnd resizeHandle, start, end fyne.Position, size fyne.Size) {
+		v.handleResized(v.currentPage, hnd, start, end, size)
+	}
+	v.currentDrawer.TraceStyle = func(size fyne.Size) (color.Color, float32) {
+		return v.traceStyleFor(v.currentPage)(size)
+	}
 	v.currentDrawer.OnFreehandDrawn = func(points []fyne.Position, size fyne.Size) {
 		v.handleFreehandDrawn(v.currentPage, points, size)
 	}
@@ -274,6 +294,7 @@ func (v *view) build() fyne.CanvasObject {
 
 	v.panel = newBookmarkPanel(v)
 	v.highlights = newHighlightsPanel(v)
+	v.thumbnails = newThumbnailPanel(v)
 	v.split = container.NewHSplit(v.panel.container, v.pdfContent)
 	v.split.SetOffset(0.22)
 
@@ -361,7 +382,7 @@ func (v *view) buildToolbar() fyne.CanvasObject {
 	drawOptions := []string{
 		"Draw: Off", "Draw: Highlight", "Draw: Underline", "Draw: Strikeout", "Draw: Squiggly",
 		"Draw: Square", "Draw: Circle", "Draw: Line",
-		"Draw: Star", "Draw: Hexagon", "Draw: Text", "Draw: Speech Bubble", "Draw: Ink", "Draw: PolyLine",
+		"Draw: Star", "Draw: Hexagon", "Draw: Text", "Draw: Speech Bubble", "Draw: Ink", "Draw: PolyLine", "Draw: Polygon",
 	}
 	drawSelect := widget.NewSelect(drawOptions, func(s string) {
 		kind := strings.TrimPrefix(s, "Draw: ")
@@ -373,6 +394,7 @@ func (v *view) buildToolbar() fyne.CanvasObject {
 	})
 	drawSelect.Selected = "Draw: Off"
 	drawSelect.Refresh()
+	v.drawSelectRef = drawSelect
 
 	// The swatch shows the color the next drawn highlight will use; tapping
 	// it opens Fyne's own color picker (Advanced mode — full RGB, not just
@@ -425,6 +447,8 @@ func (v *view) buildToolbar() fyne.CanvasObject {
 			v.setPanelMode(PanelBookmarks)
 		case "Highlights and Notes":
 			v.setPanelMode(PanelHighlights)
+		case "Page Thumbnails":
+			v.setPanelMode(PanelThumbnails)
 		default:
 			v.setPanelMode(PanelNone)
 		}

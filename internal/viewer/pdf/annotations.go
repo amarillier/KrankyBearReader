@@ -162,6 +162,13 @@ type Highlight struct {
 	// different after" mismatch CLAUDE.md already warns about elsewhere.
 	LineWidth     float64
 	origLineWidth float64
+
+	// FontSize is the text size in PDF points, meaningful only for a
+	// hasFontSize kind (FreeText) — read back from /DA's Tf operator on
+	// load (defaultFontSizePt when absent), written via /DA on save (see
+	// applyFreeTextFontSize). origFontSize snapshots it like origLineWidth.
+	FontSize     float64
+	origFontSize float64
 }
 
 // highlightKinds are the annotation types worth listing, and their display
@@ -328,7 +335,15 @@ func flattenHighlights(xRefTable *model.XRefTable, pgAnnots map[int]model.PgAnno
 				case genericRectKinds[label]:
 					h.Rect, h.Color, h.LineWidth = annotationRectPt(xRefTable, objNr)
 				}
-				h.origContents, h.origColor, h.origLineWidth = h.Contents, h.Color, h.LineWidth
+				if hasFontSize(label) {
+					var col [3]float64
+					var colorOK bool
+					h.FontSize, col, colorOK = freeTextStyle(xRefTable, objNr)
+					if colorOK {
+						h.Color = col
+					}
+				}
+				h.origContents, h.origColor, h.origLineWidth, h.origFontSize = h.Contents, h.Color, h.LineWidth, h.FontSize
 				out = append(out, h)
 			}
 		}
@@ -660,8 +675,20 @@ const defaultLineWidthPt = 1.0
 // page, or if the page's own bounds can't be read — this is cosmetic, not
 // something worth failing a page render over.
 func (d *Document) paintHighlights(img *image.RGBA, page int, dpi float64) {
+	d.paintHighlightsOpt(img, page, dpi, true)
+}
+
+// paintHighlightsOpt is paintHighlights with the UI-affordance overlays
+// (selection outline, resize handles, search-match box) switchable off —
+// a page thumbnail wants the real annotations but not those, whose fixed
+// pixel widths would swamp a 120px-wide image.
+func (d *Document) paintHighlightsOpt(img *image.RGBA, page int, dpi float64, withSelection bool) {
 	var pageHeightPt float64
 	haveBounds := false
+	selected := d.selectedHighlight
+	if !withSelection {
+		selected = nil
+	}
 
 	scale := dpi / 72.0
 	for _, h := range d.Highlights {
@@ -719,7 +746,7 @@ func (d *Document) paintHighlights(img *image.RGBA, page int, dpi float64) {
 		// it's a UI affordance over an already-rendered page, not
 		// something MuPDF has any notion of.
 		_, colorChanged, lineWidthChanged, geometryChanged := highlightDictChanges(h)
-		needsHandPaint := h.ObjNr == 0 || ((colorChanged || lineWidthChanged || geometryChanged) && newAnnotationForShape(h) != nil)
+		needsHandPaint := h.ObjNr == 0 || ((colorChanged || lineWidthChanged || fontSizeChanged(h) || geometryChanged) && newAnnotationForShape(h) != nil)
 
 		if hasGenericRect {
 			// Square/Circle/Polygon/FreeText/Ink are the kinds this app can
@@ -774,7 +801,7 @@ func (d *Document) paintHighlights(img *image.RGBA, page int, dpi float64) {
 					}
 				}
 			}
-			if h == d.selectedHighlight {
+			if h == selected {
 				drawRectOutline(img, r, selectionOutlineColor, selectionOutlineWidth)
 			}
 			continue
@@ -787,7 +814,7 @@ func (d *Document) paintHighlights(img *image.RGBA, page int, dpi float64) {
 			} else {
 				r = lineBoundsPixelRect(h.Line, pageHeightPt, scale)
 			}
-			if h == d.selectedHighlight {
+			if h == selected {
 				drawRectOutline(img, r, selectionOutlineColor, selectionOutlineWidth)
 			}
 			continue
@@ -820,13 +847,24 @@ func (d *Document) paintHighlights(img *image.RGBA, page int, dpi float64) {
 			default:
 				continue // Note (Text/Popup) has no quads to reach here at all
 			}
-			if h == d.selectedHighlight {
+			if h == selected {
 				drawRectOutline(img, r, selectionOutlineColor, selectionOutlineWidth)
 			}
 		}
 	}
 
-	if d.searchHighlightPage == page && d.searchHighlightRect != [4]float64{} {
+	if sel := selected; sel != nil && sel.Page == page && canResizeHighlight(sel) {
+		if !haveBounds {
+			if _, height, err := d.PageBoundsPt(page); err == nil {
+				pageHeightPt, haveBounds = height, true
+			}
+		}
+		if haveBounds {
+			drawResizeHandles(img, sel, pageHeightPt, scale)
+		}
+	}
+
+	if withSelection && d.searchHighlightPage == page && d.searchHighlightRect != [4]float64{} {
 		if !haveBounds {
 			_, height, err := d.PageBoundsPt(page)
 			if err != nil {
@@ -1218,6 +1256,18 @@ func (d *Document) SetSelectedHighlight(h *Highlight) {
 	}
 	d.selectedHighlight = h
 	d.cache.Clear()
+}
+
+// highlightCountOnPage reports how many highlights/shapes/notes page
+// (1-based) has, for the thumbnail panel's labels and annotated-only filter.
+func (d *Document) highlightCountOnPage(page int) int {
+	n := 0
+	for _, h := range d.Highlights {
+		if h.Page == page {
+			n++
+		}
+	}
+	return n
 }
 
 // lineHitTestPadPt widens a Line annotation's own bounding box by this

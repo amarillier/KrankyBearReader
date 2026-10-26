@@ -66,6 +66,9 @@ PDF VIEWING:
 • Continuous Scroll or page-by-page (toggle in the toolbar); zoom to a fixed
   level or Fit Width / Fit Page.
 • Table of Contents: the PDF's own outline, if it has one.
+• Page Thumbnails: small previews of every page with your annotations shown;
+  click one to jump there. "Annotated pages only" lists just the pages that
+  have highlights or shapes.
 • Bookmarks: add your own (optionally at your exact scroll position, not
   just the top of the page), then Save to PDF — also reachable from the File
   menu (and tray) without opening the panel first. Saving as a new file
@@ -90,18 +93,21 @@ PDF VIEWING:
   Speech Bubble prompt for the caption right after the drag; Line draws as
   an arrow from where you start dragging to where you release; Ink and
   PolyLine both trace your actual freehand drag as a single pen stroke,
-  not a rectangle (the live preview while dragging is still just a
-  bounding-box rectangle, same as every other kind — the real stroke only
-  appears once you release).
+  not a rectangle (your stroke is traced live as you drag; one that ends
+  near where it began snaps shut). Polygon is the same freehand drag but
+  always closes on release into a real closed shape.
 • Select and edit: click any highlight/shape directly on the page, or pick
   it from the panel's own list, to select it — shown with a blue outline.
   "Change Color" recolors it (for the kinds this app can draw itself);
   "Change Line Weight" adjusts its stroke width (Square/Circle/Line/
-  Polygon/Ink/PolyLine only); Delete/Backspace (or the panel's "Delete
+  Polygon/Ink/PolyLine only); "Change Text Size" sets a Text block or
+  Speech Bubble's font size (10-24pt); Delete/Backspace (or the panel's "Delete
   Selected" button) removes it; Escape, or clicking empty page space,
   deselects without changing anything. With Draw mode off, drag a selected
   shape (one this app can draw itself) directly on the page to reposition
-  it — resizing isn't supported yet.
+  it, or drag one of the small square handles around it to resize (a
+  Line's endpoints, a Speech Bubble's tail, and a bounding-box grip on
+  everything else).
 • Save to PDF: writes your changes back — overwrite the original, or "Save
   as a new file..." (the tab then follows the new file). Real edits to the
   PDF's own annotations, so other readers (Preview, Acrobat, ...) see them
@@ -155,15 +161,13 @@ KEYBOARD SHORTCUTS:
 
 KNOWN LIMITATIONS:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• PDF region bookmarks (an exact scroll position, not just a page) aren't
-  preserved on Save to PDF today — they're saved as page-level bookmarks;
-  the position is remembered only for the current session.
-• Existing highlights/shapes can be selected, deleted, and (for the kinds
-  this app can draw) recolored, but not yet moved, resized, or otherwise
-  edited directly on the page.
-• Stamp, Ink, PolyLine, and Caret annotations can be viewed, selected, and
-  deleted, but not drawn by this app — anything already saved in the file
-  still renders and behaves correctly either way.
+• Existing highlights/shapes (the kinds this app can draw) can be selected,
+  recolored, moved, resized, and deleted; ones it can't fully rebuild
+  (e.g. a Polygon from another app) can be deleted but not moved or
+  resized.
+• Stamp and Caret annotations can be viewed, selected, and deleted, but not
+  drawn by this app — anything already saved in the file still renders and
+  behaves correctly either way.
 • Text/Markdown find moves to each match but can't paint a visible
   highlight box around it — a limitation of the underlying text widgets,
   not a missing feature. PDF find's own highlight box is an estimate, not

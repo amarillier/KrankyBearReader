@@ -86,6 +86,7 @@ func newHighlightsPanel(v *view) *highlightsPanel {
 			prev := hp.selected
 			hp.selected = v.doc.Highlights[id]
 			v.doc.SetSelectedHighlight(hp.selected)
+			v.endDrawModeForSelection()
 			if prev != nil && prev.Page != hp.selected.Page {
 				v.repaintPage(prev.Page)
 			}
@@ -97,6 +98,8 @@ func newHighlightsPanel(v *view) *highlightsPanel {
 	editBtn := widget.NewButton("Edit Caption", hp.editSelected)
 	colorBtn := widget.NewButton("Change Color", hp.changeSelectedColor)
 	lineWidthBtn := widget.NewButton("Change Line Weight", hp.changeSelectedLineWidth)
+
+	fontSizeBtn := widget.NewButton("Change Text Size", hp.changeSelectedFontSize)
 
 	deleteBtn := widget.NewButton("Delete Selected", hp.deleteSelected)
 	deleteBtn.Importance = widget.WarningImportance
@@ -111,7 +114,7 @@ func newHighlightsPanel(v *view) *highlightsPanel {
 	// PDF) is a VBox for exactly this reason: stacked, the panel's MinSize
 	// is only its single widest button, matching how TOC/Bookmarks already
 	// narrow down freely.
-	toolbar := container.NewVBox(editBtn, colorBtn, lineWidthBtn, deleteBtn, saveBtn)
+	toolbar := container.NewVBox(editBtn, colorBtn, lineWidthBtn, fontSizeBtn, deleteBtn, saveBtn)
 
 	hp.container = container.NewBorder(toolbar, nil, nil, nil, hp.list)
 	return hp
@@ -262,6 +265,44 @@ func (hp *highlightsPanel) changeSelectedLineWidth() {
 		}
 		hp.v.doc.SetHighlightLineWidth(h, w)
 		hp.notifyIfRenderIsDeferred(h, "line weight")
+		hp.deselect()
+	}, hp.v.win)
+
+	d.Resize(fyne.NewSize(360, 180))
+	d.Show()
+}
+
+// changeSelectedFontSize is changeSelectedLineWidth's sibling for a
+// FreeText's text size (see Highlight.FontSize), with the same preset-list
+// dialog and the same deselect-after so the selection outline can't mask
+// the change.
+func (hp *highlightsPanel) changeSelectedFontSize() {
+	h := hp.selected
+	if h == nil {
+		dialog.ShowInformation("No Selection", "Please select a text block or speech bubble to change its text size", hp.v.win)
+		return
+	}
+	if !hasFontSize(h.Kind) {
+		dialog.ShowInformation("Not supported",
+			fmt.Sprintf("%s annotations don't have adjustable text.", h.Kind),
+			hp.v.win)
+		return
+	}
+
+	sizeSelect := widget.NewSelect(fontSizeOptions(), nil)
+	sizeSelect.Selected = fontSizeLabel(h.FontSize)
+	form := widget.NewForm(widget.NewFormItem("Text Size:", sizeSelect))
+
+	d := dialog.NewCustomConfirm("Change Text Size", "Change", "Cancel", form, func(ok bool) {
+		if !ok {
+			return
+		}
+		sz, valid := parseFontSizeLabel(sizeSelect.Selected)
+		if !valid {
+			return
+		}
+		hp.v.doc.SetHighlightFontSize(h, sz)
+		hp.notifyIfRenderIsDeferred(h, "text size")
 		hp.deselect()
 	}, hp.v.win)
 

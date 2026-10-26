@@ -58,3 +58,7 @@ get-mesa.sh
 setver.sh
 !installerbear.yaml
 */.DS_Store
+
+# Build host details and retired scripts (see build/)
+/build/hosts.env
+/build/legacy/

@@ -277,3 +277,19 @@ func TestTypedKey_EscapeDeselects(t *testing.T) {
 		t.Errorf("expected Escape to deselect, got %v still selected", v.highlights.selected)
 	}
 }
+
+// Selecting an existing shape must switch Draw mode off, or the next drag
+// on its handles would draw a new shape instead of resizing it.
+func TestSelectingHighlightTurnsDrawModeOff(t *testing.T) {
+	v := newTestView(t)
+	v.doc.AddRectShape(1, "Square", [4]float64{10, 10, 60, 60}, [3]float64{1, 0, 0}, 1)
+	v.highlights.refreshList()
+	v.drawSelectRef.SetSelected("Draw: Text")
+	if v.drawKind != "Text" || !v.currentDrawer.Enabled {
+		t.Fatalf("setup: drawKind=%q enabled=%v", v.drawKind, v.currentDrawer.Enabled)
+	}
+	v.highlights.list.Select(0)
+	if v.drawKind != "" || v.currentDrawer.Enabled || v.drawSelectRef.Selected != "Draw: Off" {
+		t.Errorf("after selecting: drawKind=%q enabled=%v dropdown=%q", v.drawKind, v.currentDrawer.Enabled, v.drawSelectRef.Selected)
+	}
+}

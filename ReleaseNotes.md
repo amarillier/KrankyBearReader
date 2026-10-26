@@ -3,36 +3,12 @@
 ## Windows, Linux and MacOS multi-format document reader/viewer
 
 ## Future ideas:
-- **Deliberate pause point before 0.8.0**: with the right-click context
-  menu and remembered color/line-weight defaults now shipped (see 0.7.0's
-  own NEW entries), the next priority — resize an existing shape (see the
-  item right below) — was explicitly deferred rather than squeezed into
-  the same release, per direct user preference: it needs real new
-  interactive UI (resize handles, per-kind resize semantics) rather than
-  reusing existing plumbing the way the context menu did, and deserves its
-  own focused pass. Plan going into 0.8.0: more hands-on testing of
-  everything above, commit, and release 0.7.0 as-is before picking resize
-  back up. Stamp/Caret authoring and a real click-vertex PolyLine tool
-  (see their own items below) remain explicitly deferred too — Change
-  Color/Change Line Weight/Move already cover most of what "edit an
-  existing shape" meant in practice, per direct user feedback.
-- Resize an already-placed highlight/shape (drag-to-MOVE one shipped in
-  0.7.0 — see its own NEW entry — this is the "and resize" half that
-  didn't). Needs real interactive UI (resize handles at corners/edges,
-  presumably) beyond what click-to-select/move already has, and, for an
-  already-saved shape, the exact same delete-and-reauthor-via-
-  newAnnotationForShape mechanism Move already uses (MoveHighlight/
-  canMoveHighlight in highlight_edit.go) — a bare geometry rewrite alone
-  still wouldn't move what's actually painted for anything with a baked
-  `/AP`, the same reasoning that already applied to Move and, before it,
-  recoloring (see 0.5.0 and 0.7.0's own notes). Preview's own
-  drag-the-midpoint arrow-curving trick belongs here too, once this
-  exists: matching whatever non-standard representation Preview uses for
-  an "edited" shape, reverse-engineered from a real file the way the
-  Line/arrow geometry work elsewhere in this file already was once. A
-  speech bubble's callout tail currently lands at a fixed offset (see
-  AddTextShape/calloutTipFor) — aiming it precisely also belongs here,
-  not in initial drawing.
+- Preview's drag-the-midpoint arrow-curving trick: matching whatever
+  non-standard representation Preview uses for an "edited" (curved) arrow,
+  reverse-engineered from a real file the way the Line/arrow geometry work
+  was once. Resize (0.8.0) covers straight endpoints only. Stamp/Caret
+  authoring and a real click-vertex PolyLine tool (below) remain
+  deliberately deferred.
 - A real click-vertex-then-finish PolyLine tool — click to place each
   vertex, then some way to finish (double-click, Enter, Escape, or
   clicking back near the start) — rather than today's PolyLine (0.7.0),
@@ -70,26 +46,6 @@
   has no coordinate model to translate and rewrite,
   so an already-saved foreign Stamp is permanently non-movable by this
   app, not just not-yet-supported.
-- Adjustable text size for Text block/Speech Bubble annotations — found
-  worth asking for via real hands-on testing of the right-click "Add
-  Shape" submenu's Speech Bubble option: color is already changeable
-  (Change Color already covers FreeText, see 0.6.0), but the text itself
-  is always drawn at a fixed size, with no way to make it bigger. No font
-  picker intended (noted explicitly as a "maybe someday, some might like
-  it" non-goal, not scoped here) — just a single sensible font at a
-  choice of sizes. Should follow the same pattern Line Weight already
-  established (`lineWeightPresets`/`lineWeightOptions` in
-  highlight_lineweight.go): a closed preset list (something like
-  10/12/14/18/24pt), not a free-form 1-128 numeric entry a mis-typed value
-  could turn into an unreadably tiny or absurdly oversized annotation —
-  explicitly requested this way rather than an open range. Both halves
-  already have a slot ready: `model.NewFreeTextAnnotation`'s own
-  `fontSize int` parameter (currently always passed as `0`, i.e. MuPDF's
-  default, in `newAnnotationForShape`'s FreeText case) for the real saved
-  annotation, and `text_shape.go`'s `basicfont.Face7x13`-based
-  `drawWrappedText`/`wrapText` for the in-app hand-paint preview (would
-  need a way to scale a fixed bitmap font, or swap to a scalable one, to
-  actually honor a chosen size there).
 - A plain text block still shows a visible border, unlike Preview's own
   borderless "Text" tool — tried making it borderless (both in the
   preview and the real saved annotation) and reverted: MuPDF's own
@@ -99,19 +55,6 @@
   baking a custom appearance stream with no border path in it at all —
   real content-stream + font-resource authoring, a bigger effort than a
   border-width parameter, not attempted yet.
-- Draw Ink/PolyLine's own live preview is only the same bounding-box
-  rectangle every other "Draw" kind shows while dragging (highlightDrawer's
-  single overlay rectangle, reused rather than building a new
-  live-rendering path — see CLAUDE.md's own Ink section) — confirmed via
-  real hands-on testing to work, but "a little confusing at first," since
-  for every OTHER kind that rectangle is a reasonable preview of the final
-  shape, while for a freehand stroke it has nothing to do with the actual
-  line being drawn. A real point-by-point live trace (the overlay
-  following the pen tip exactly, not just its bounding box) would need
-  either several `canvas.Line` segments added/extended per `Dragged` call
-  or a small custom `fyne.CanvasObject` that redraws its own path — real
-  UI work, not attempted yet since the plain rectangle already confirmed
-  functional.
 - Real text-snapped highlight drawing, like Preview/Acrobat's "select text
   → highlight" — today's "Draw Highlight" (see Version 0.4.0) is a free
   hand-drawn rectangle, not snapped to text, because go-fitz has no word/
@@ -143,10 +86,88 @@
   drawing) is blocked on — worth doing together if ever attempted. Per
   direct user preference, the shape-work items above this take
   precedence over picking this back up.
-- Maybe a bigger effort - similar to Mac Preview ability to show pdf page thumbnails to make finding test, highlights, shapes etc easier?
 - A visible highlight box for Text/Markdown find matches (Fyne's Entry/
   RichText widgets have no public API for painting a selection from code)
 
+
+## Version 0.8.1 - October 26, 2026
+
+### ✨ NEW
+
+- "Draw: Polygon": trace a freehand outline and it closes itself when you
+  let go (a faint line shows where it will close while you draw), then is
+  thinned to a sensible number of corners and saved as a real PDF Polygon.
+- Ink and PolyLine strokes that end close to where they began now snap shut
+  onto the start point, so an almost-closed loop really is closed.
+- Changing a Text block or Speech Bubble's size now grows its box downward
+  if the bigger text wouldn't fit (best effort; you can still resize it).
+
+### 🐞 FIXED
+
+- The live pen trace for Ink/PolyLine/Polygon now uses your chosen color and
+  line weight (scaled to the page's on-screen size), so it looks like the
+  finished shape instead of a thin orange line that thickened on release.
+- A PolyLine/Ink/Polygon stroke finished exactly on its own start point
+  could vanish entirely: the drag looked like a click (start and end the
+  same spot) and was discarded. Whether it was a click is now judged from
+  the whole stroke's extent.
+- The live pen trace while drawing Ink/PolyLine didn't appear in the real
+  window (it only showed up in headless tests) — the drawing surface never
+  asked for a repaint as the stroke grew.
+
+- Selecting an existing shape (on the page or in the Highlights panel) now
+  switches the "Draw:" dropdown back to Off, so dragging its handles or body
+  resizes/moves it instead of starting a new shape.
+- Changing the text size (or anything else) on a Text block from another app
+  no longer turns its text yellow: the text color is now read from the
+  annotation's own text style (RGB, gray or CMYK, or its default-style
+  string), falling back to black rather than highlighter yellow. For a
+  Text block from Preview this now reads the color and size from its
+  appearance (the red, ~13.5pt text you actually see) — its stored
+  text-style fields are stale placeholders.
+- Changing a Text block's size no longer shows an empty box until you resize
+  it: when the new size is too big for the box, the first line of text is
+  still drawn (overflowing, as other PDF viewers do) instead of nothing.
+
+## Version 0.8.0 - October 26, 2026
+
+### ✨ NEW
+
+- Adjustable text size for Text block and Speech Bubble annotations: the
+  Highlights panel's new "Change Text Size" button offers 10/12/14/18/24pt
+  (a closed list, like Line Weight). The size is written into the PDF
+  itself, so other viewers show it too, and the in-app preview now uses a
+  scalable font that follows both the chosen size and the zoom level.
+
+- Drawing Ink or PolyLine now shows your actual pen stroke live as you
+  drag, instead of the bounding-box rectangle every other shape uses.
+
+- Resize an already-placed shape: select it and drag the small square
+  handles that appear — 8 around the bounding box for most shapes
+  (Highlight/Underline/Strikeout/Squiggly, Square, Circle, Star/Hexagon,
+  Text, Speech Bubble, Ink, PolyLine; freehand strokes and multi-line
+  highlights scale as a whole), the two endpoints for a Line/arrow, and an
+  extra handle on a Speech Bubble's tail so you can aim it precisely. A
+  live outline shows the new size while you drag. Works for shapes from
+  other apps too, wherever Move already did; a shape this app can't fully
+  rebuild shows no handles.
+
+- Page thumbnails panel (the panel dropdown's new "Page Thumbnails"): a
+  scrolling strip of small page previews with your highlights and shapes
+  painted in, each labelled with its page number and annotation count. Click
+  one to jump there; the current page stays highlighted as you navigate. Tick
+  "Annotated pages only" to list just the pages that have annotations — a
+  quick way to find your highlights and shapes in a long document. Previews
+  render a few at a time in the background of the UI so large documents stay
+  responsive, and refresh when you add, change or delete an annotation.
+
+### 🐞 FIXED
+
+- Text blocks and Speech Bubbles saved by this app rendered as a solid
+  filled box in the annotation's own color, hiding their text (the text was
+  the same color as the fill). The color is now carried by the text/border
+  alone, so the text is visible after saving. Already-saved ones from older
+  versions load as before.
 
 ## Version 0.7.0 - October 01, 2026
 

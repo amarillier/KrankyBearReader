@@ -141,3 +141,63 @@ func TestBookmarkPanel_ShowAddDialogAt_UsesGivenPageAndFraction(t *testing.T) {
 		t.Errorf("expected showAddDialogAt not to change the view's own current page, got %d", v.currentPage)
 	}
 }
+
+func TestSnapClosedIfNearStart(t *testing.T) {
+	loop := [][2]float64{{0, 0}, {50, 0}, {50, 50}, {0, 50}, {2, 3}}
+	got := snapClosedIfNearStart(loop)
+	if got[len(got)-1] != got[0] {
+		t.Errorf("a nearly-closed loop should snap its last point to the start: %v", got)
+	}
+	if loop[len(loop)-1] != [2]float64{2, 3} {
+		t.Error("input slice must not be mutated")
+	}
+	open := [][2]float64{{0, 0}, {50, 0}, {50, 50}, {0, 50}}
+	if g := snapClosedIfNearStart(open); g[len(g)-1] != open[len(open)-1] {
+		t.Errorf("a clearly open stroke must stay open: %v", g)
+	}
+	if g := snapClosedIfNearStart([][2]float64{{0, 0}, {1, 1}}); len(g) != 2 || g[1] != [2]float64{1, 1} {
+		t.Errorf("too-short stroke changed: %v", g)
+	}
+}
+
+func TestSimplifyPath_ThinsDensePointsButKeepsCorners(t *testing.T) {
+	var pts [][2]float64
+	for i := 0; i <= 100; i++ { // dense straight run, then a corner, then another run
+		pts = append(pts, [2]float64{float64(i), 0})
+	}
+	for i := 1; i <= 100; i++ {
+		pts = append(pts, [2]float64{100, float64(i)})
+	}
+	got := simplifyPath(pts, 1.5)
+	if len(got) != 3 || got[1] != [2]float64{100, 0} {
+		t.Errorf("expected just the two endpoints and the corner, got %v", got)
+	}
+}
+
+func TestHandleFreehandDrawn_PolygonKindAddsClosedSimplifiedPolygon(t *testing.T) {
+	v := newTestView(t)
+	pageW, pageH, _ := v.doc.PageBoundsPt(1)
+	size := fyne.NewSize(float32(pageW), float32(pageH))
+	v.drawKind = "Polygon"
+	var pts []fyne.Position
+	add := func(x, y float32) { pts = append(pts, fyne.NewPos(x, y)) }
+	for i := 0; i <= 60; i++ { // a dense square loop
+		add(20+float32(i), 20)
+	}
+	for i := 1; i <= 60; i++ {
+		add(80, 20+float32(i))
+	}
+	for i := 1; i <= 60; i++ {
+		add(80-float32(i), 80)
+	}
+	for i := 1; i <= 60; i++ {
+		add(20, 80-float32(i))
+	}
+	v.handleFreehandDrawn(1, pts, size)
+	if len(v.doc.Highlights) != 1 || v.doc.Highlights[0].Kind != "Polygon" {
+		t.Fatalf("expected one Polygon, got %+v", v.doc.Highlights)
+	}
+	if n := len(v.doc.Highlights[0].Vertices); n < 4 || n > 8 {
+		t.Errorf("a square loop should thin to a handful of vertices, got %d", n)
+	}
+}

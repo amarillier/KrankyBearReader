@@ -68,6 +68,12 @@ type Document struct {
 	// Highlights panel — see SetSelectedHighlight.
 	selectedHighlight *Highlight
 
+	// thumbs holds page thumbnails (see RenderThumbnail), separate from
+	// cache so a screenful of tiny previews can't evict full-size pages.
+	// Cleared together with cache by invalidateRender; nil in a bare test
+	// Document, which every use tolerates.
+	thumbs *pageCache
+
 	textCacheMu sync.Mutex
 	textCache   map[int]string // page -> extracted text, filled lazily by PageText
 
@@ -88,6 +94,7 @@ func Prepare(path string) (*Document, error) {
 	d := &Document{
 		path:      path,
 		cache:     newPageCache(pageCacheCapacity),
+		thumbs:    newPageCache(thumbnailCacheCapacity),
 		Bookmarks: NewBookmarkManager(),
 		textCache: map[int]string{},
 		lineCache: map[int][]textLine{},
@@ -123,10 +130,55 @@ func (d *Document) PageText(page int) (string, error) {
 	return t, nil
 }
 
+// thumbnailCacheCapacity bounds how many page thumbnails are kept (about
+// 75KB each at the panel's width).
+const thumbnailCacheCapacity = 300
+
+// invalidateRender drops every cached render of this document — full pages
+// and thumbnails — after anything that changes what a page shows. Selection
+// and search-match changes call cache.Clear directly instead: they only
+// affect overlays a thumbnail doesn't draw.
+func (d *Document) invalidateRender() {
+	d.cache.Clear()
+	if d.thumbs != nil {
+		d.thumbs.Clear()
+	}
+}
+
+// RenderThumbnail renders page (1-based) about widthPx pixels wide with
+// its annotations painted but no selection overlays, cached separately
+// from RenderPage. MuPDF renders directly at the low DPI, so this is much
+// cheaper than a full-size render.
+func (d *Document) RenderThumbnail(page, widthPx int) (image.Image, error) {
+	if page < 1 || page > d.pageCount {
+		return nil, fmt.Errorf("page %d out of range (1-%d)", page, d.pageCount)
+	}
+	key := cacheKey(page, float64(widthPx))
+	if d.thumbs != nil {
+		if img, ok := d.thumbs.Get(key); ok {
+			return img, nil
+		}
+	}
+	pageW, _, err := d.PageBoundsPt(page)
+	if err != nil || pageW <= 0 {
+		return nil, fmt.Errorf("page %d bounds: %v", page, err)
+	}
+	dpi := min(max(float64(widthPx)*72/pageW, 12), 150)
+	img, err := d.doc.ImageWithAnnotsDPI(page-1, dpi)
+	if err != nil {
+		return nil, fmt.Errorf("rendering thumbnail %d: %w", page, err)
+	}
+	d.paintHighlightsOpt(img, page, dpi, false)
+	if d.thumbs != nil {
+		d.thumbs.Put(key, img)
+	}
+	return img, nil
+}
+
 // Close releases the underlying MuPDF document. Must be called exactly once
 // when the owning tab closes.
 func (d *Document) Close() error {
-	d.cache.Clear()
+	d.invalidateRender()
 	err := d.closeDoc()
 	return err
 }
@@ -321,7 +373,7 @@ func (d *Document) buildNormalizedDoc() (*fitz.Document, string, error) {
 		// highlightsPanel's own changeSelectedColor/changeSelectedLineWidth
 		// for the transient notice shown when this applies.
 		_, colorChanged, lineWidthChanged, geometryChanged := highlightDictChanges(h)
-		if (colorChanged || lineWidthChanged || geometryChanged) && newAnnotationForShape(h) != nil {
+		if (colorChanged || lineWidthChanged || fontSizeChanged(h) || geometryChanged) && newAnnotationForShape(h) != nil {
 			removeObjNrs = append(removeObjNrs, h.ObjNr)
 		}
 	}

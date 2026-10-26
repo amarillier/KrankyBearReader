@@ -48,7 +48,7 @@ func TestWrapText_SingleWordWiderThanMaxWidthKeptWhole(t *testing.T) {
 
 func TestDrawWrappedText_EmptyStringPaintsNothing(t *testing.T) {
 	img := image.NewRGBA(image.Rect(0, 0, 100, 100))
-	drawWrappedText(img, image.Rect(0, 0, 100, 100), "", color.NRGBA{R: 255, A: 255})
+	drawWrappedText(img, image.Rect(0, 0, 100, 100), "", color.NRGBA{R: 255, A: 255}, 12)
 	for y := 0; y < 100; y++ {
 		for x := 0; x < 100; x++ {
 			if img.RGBAAt(x, y).A > 0 {
@@ -61,7 +61,7 @@ func TestDrawWrappedText_EmptyStringPaintsNothing(t *testing.T) {
 func TestDrawWrappedText_NonEmptyTextPaintsSomethingInsideBounds(t *testing.T) {
 	img := image.NewRGBA(image.Rect(0, 0, 200, 100))
 	r := image.Rect(10, 10, 190, 90)
-	drawWrappedText(img, r, "Hello there", color.NRGBA{R: 0, G: 0, B: 0, A: 255})
+	drawWrappedText(img, r, "Hello there", color.NRGBA{R: 0, G: 0, B: 0, A: 255}, 12)
 
 	painted := false
 	for y := r.Min.Y; y < r.Max.Y; y++ {
@@ -141,5 +141,25 @@ func TestDrawFreeTextPreview_SpeechBubbleHasBorderAndCallout(t *testing.T) {
 	// along that path, well outside the box itself.
 	if img.RGBAAt(15, 85).A == 0 {
 		t.Errorf("expected the callout line painted outside the box toward its tip, found nothing at (15,85)")
+	}
+}
+
+// A box too short for even one line still shows that line (clipped by the
+// image edge at worst), instead of looking empty.
+func TestDrawWrappedText_FirstLineAlwaysDrawsInTooShortBox(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 300, 100))
+	r := image.Rect(10, 30, 290, 42) // 12px tall: far less than a 30px line plus padding
+	drawWrappedText(img, r, "Overflow", color.NRGBA{A: 255}, 30)
+	painted := false
+	for y := 0; y < 100 && !painted; y++ {
+		for x := 0; x < 300; x++ {
+			if img.RGBAAt(x, y).A > 0 {
+				painted = true
+				break
+			}
+		}
+	}
+	if !painted {
+		t.Error("expected the first line painted even though the box is too short for it")
 	}
 }

@@ -2,6 +2,7 @@ package pdf
 
 import (
 	"fmt"
+	"image/color"
 	"math"
 	"regexp"
 	"strings"
@@ -296,6 +297,7 @@ func (v *view) renderCurrentPage() error {
 // lazyRenderVisible only fills in a page image when it's nil, so that one
 // needs an explicit nudge.
 func (v *view) repaintPage(page int) {
+	v.refreshThumbnails()
 	if v.continuous {
 		if i := page - 1; i >= 0 && i < len(v.pageImages) {
 			v.pageImages[i].Image = nil
@@ -311,12 +313,22 @@ func (v *view) repaintPage(page int) {
 	}
 }
 
+// refreshThumbnails re-renders the thumbnail panel's rows, but only while
+// it's actually showing — every annotation mutation calls repaintPage, and
+// the Document has already dropped its stale thumbnails by then.
+func (v *view) refreshThumbnails() {
+	if v.thumbnails != nil && v.panelMode == PanelThumbnails {
+		v.thumbnails.refresh()
+	}
+}
+
 // refreshAllPages forces every page — not just the current one — to
 // re-render on the next paint, unlike repaintPage's single-page targeting.
 // Used by retargetTo after swapping in an entirely different Document: any
 // page could show different content now, not only whichever one happened
 // to be on screen at the time.
 func (v *view) refreshAllPages() {
+	v.refreshThumbnails()
 	if v.continuous {
 		for _, img := range v.pageImages {
 			if img != nil {
@@ -338,18 +350,47 @@ func (v *view) refreshAllPages() {
 // Applies to every page's drawer at once, single-page and continuous
 // alike, so switching modes mid-scroll doesn't leave some pages still
 // draggable while others aren't.
+// endDrawModeForSelection switches the toolbar's Draw dropdown back to Off.
+// Called when an existing shape gets selected: while a Draw kind is active a
+// drag on the shape's resize handles or body starts drawing a NEW shape
+// instead of resizing/moving the selected one, so selecting something means
+// the user wants to edit it, not draw.
+func (v *view) endDrawModeForSelection() {
+	if v.drawKind != "" && v.drawSelectRef != nil {
+		v.drawSelectRef.SetSelected("Draw: Off") // fires OnChanged -> setDrawKind("")
+	}
+}
+
+// traceStyleFor returns the live-trace style for a page's drawer: the
+// chosen color and line weight, with the weight (PDF points) scaled to the
+// page's current on-screen size so the trace is as thick as the finished
+// shape will be.
+func (v *view) traceStyleFor(page int) func(fyne.Size) (color.Color, float32) {
+	return func(size fyne.Size) (color.Color, float32) {
+		pageW, _, err := v.doc.PageBoundsPt(page)
+		if err != nil || pageW <= 0 {
+			return nil, 0
+		}
+		w := float32(v.lineWidthPt * float64(size.Width) / pageW)
+		return withAlpha(rgbToFyneColor(v.highlightColor), 230), max(w, 1)
+	}
+}
+
 func (v *view) setDrawKind(kind string) {
 	v.drawKind = kind
 	enabled := kind != ""
-	freehand := kind == "Ink" || kind == "PolyLine"
+	freehand := isFreehandKind(kind)
+	closing := kind == "Polygon"
 	if v.currentDrawer != nil {
 		v.currentDrawer.Enabled = enabled
 		v.currentDrawer.FreehandMode = freehand
+		v.currentDrawer.ClosePreview = closing
 	}
 	for _, d := range v.pageDrawers {
 		if d != nil {
 			d.Enabled = enabled
 			d.FreehandMode = freehand
+			d.ClosePreview = closing
 		}
 	}
 }
@@ -438,6 +479,71 @@ func (v *view) handleHighlightDrawn(page int, start, end fyne.Position, widgetSi
 // PolyLine isn't yet a real click-vertex-then-finish tool), then makes it
 // visible immediately the same way every other newly-drawn shape already
 // does.
+// isFreehandKind reports whether a Draw kind is captured as a pen trace
+// (every sampled point of one continuous drag) rather than a dragged
+// rectangle or line.
+func isFreehandKind(kind string) bool {
+	return kind == "Ink" || kind == "PolyLine" || kind == "Polygon"
+}
+
+const (
+	// closeSnapDistancePt: a stroke ending within this many PDF points of
+	// where it started is snapped shut onto the start point.
+	closeSnapDistancePt = 10.0
+	// polygonSimplifyTolerancePt: a freehand Polygon's pen trace is thinned
+	// until no dropped point is farther than this from the kept outline.
+	polygonSimplifyTolerancePt = 1.5
+)
+
+// snapClosedIfNearStart closes an Ink/PolyLine stroke that ends near where
+// it began by moving its last point exactly onto the first, so a loop the
+// user "almost" closed really is closed. Strokes too short to enclose
+// anything, or whose end is far from the start, are returned unchanged.
+func snapClosedIfNearStart(pts [][2]float64) [][2]float64 {
+	if len(pts) < 4 {
+		return pts
+	}
+	first, last := pts[0], pts[len(pts)-1]
+	if math.Hypot(last[0]-first[0], last[1]-first[1]) > closeSnapDistancePt {
+		return pts
+	}
+	out := append([][2]float64(nil), pts...)
+	out[len(out)-1] = first
+	return out
+}
+
+// simplifyPath thins a dense pen trace with Ramer-Douglas-Peucker,
+// keeping every point that deviates more than tolerance from the straight
+// run between its neighbors.
+func simplifyPath(pts [][2]float64, tolerance float64) [][2]float64 {
+	if len(pts) < 3 {
+		return pts
+	}
+	a, b := pts[0], pts[len(pts)-1]
+	maxDist, idx := 0.0, 0
+	for i := 1; i < len(pts)-1; i++ {
+		if d := pointSegmentDistance(pts[i], a, b); d > maxDist {
+			maxDist, idx = d, i
+		}
+	}
+	if maxDist <= tolerance {
+		return [][2]float64{a, b}
+	}
+	left := simplifyPath(pts[:idx+1], tolerance)
+	right := simplifyPath(pts[idx:], tolerance)
+	return append(left[:len(left):len(left)], right[1:]...)
+}
+
+func pointSegmentDistance(p, a, b [2]float64) float64 {
+	dx, dy := b[0]-a[0], b[1]-a[1]
+	l2 := dx*dx + dy*dy
+	if l2 == 0 {
+		return math.Hypot(p[0]-a[0], p[1]-a[1])
+	}
+	t := math.Max(0, math.Min(1, ((p[0]-a[0])*dx+(p[1]-a[1])*dy)/l2))
+	return math.Hypot(p[0]-(a[0]+t*dx), p[1]-(a[1]+t*dy))
+}
+
 func (v *view) handleFreehandDrawn(page int, points []fyne.Position, widgetSize fyne.Size) {
 	pageW, pageH, err := v.doc.PageBoundsPt(page)
 	if err != nil {
@@ -448,10 +554,20 @@ func (v *view) handleFreehandDrawn(page int, points []fyne.Position, widgetSize 
 		x, y := widgetPointToPDF(p, widgetSize, pageW, pageH)
 		pdfPoints[i] = [2]float64{x, y}
 	}
-	if v.drawKind == "PolyLine" {
-		v.doc.AddPolyLineShape(page, pdfPoints, v.highlightColor, v.lineWidthPt)
-	} else {
-		v.doc.AddInkShape(page, pdfPoints, v.highlightColor, v.lineWidthPt)
+	switch v.drawKind {
+	case "Polygon":
+		// A freehand Polygon always closes on release (the saved shape
+		// closes back to its first vertex by definition), and a dense pen
+		// trace is thinned to a sensible vertex count first.
+		pdfPoints = simplifyPath(pdfPoints, polygonSimplifyTolerancePt)
+		if len(pdfPoints) < 3 {
+			return
+		}
+		v.doc.AddPolygonShape(page, pdfPoints, v.highlightColor, v.lineWidthPt)
+	case "PolyLine":
+		v.doc.AddPolyLineShape(page, snapClosedIfNearStart(pdfPoints), v.highlightColor, v.lineWidthPt)
+	default:
+		v.doc.AddInkShape(page, snapClosedIfNearStart(pdfPoints), v.highlightColor, v.lineWidthPt)
 	}
 	v.highlights.refreshList()
 	v.repaintPage(page)
@@ -612,6 +728,61 @@ func (v *view) handleHighlightMoveHitTest(page int, pos fyne.Position, widgetSiz
 	}
 	tl, br = pdfRectToWidget(rect, widgetSize, pageW, pageH)
 	return tl, br, true
+}
+
+// handleResizeHitTest is every highlightDrawer.HitTestHandle's target:
+// whether pos grabs one of the selected shape's resize grips.
+func (v *view) handleResizeHitTest(page int, pos fyne.Position, widgetSize fyne.Size) (resizeHandle, bool) {
+	h := v.doc.selectedHighlight
+	if h == nil || h.Page != page || !canResizeHighlight(h) {
+		return handleNone, false
+	}
+	pageW, pageH, err := v.doc.PageBoundsPt(page)
+	if err != nil {
+		return handleNone, false
+	}
+	x, y := widgetPointToPDF(pos, widgetSize, pageW, pageH)
+	return hitResizeHandle(h, x, y)
+}
+
+// resizeDeltaPt converts a drag from start to cur (widget-local) into a
+// PDF-space delta (dy positive = up).
+func (v *view) resizeDeltaPt(page int, start, cur fyne.Position, widgetSize fyne.Size) (dx, dy float64, pageW, pageH float64, ok bool) {
+	pageW, pageH, err := v.doc.PageBoundsPt(page)
+	if err != nil {
+		return 0, 0, 0, 0, false
+	}
+	x1, y1 := widgetPointToPDF(start, widgetSize, pageW, pageH)
+	x2, y2 := widgetPointToPDF(cur, widgetSize, pageW, pageH)
+	return x2 - x1, y2 - y1, pageW, pageH, true
+}
+
+// handleResizeGhost is every highlightDrawer.ResizeGhost's target: the
+// selected shape's would-be bounding box if the grip were released at cur.
+func (v *view) handleResizeGhost(page int, handle resizeHandle, start, cur fyne.Position, widgetSize fyne.Size) (tl, br fyne.Position) {
+	h := v.doc.selectedHighlight
+	dx, dy, pageW, pageH, ok := v.resizeDeltaPt(page, start, cur, widgetSize)
+	if h == nil || !ok {
+		return fyne.Position{}, fyne.Position{}
+	}
+	b, ok := resizedBoundsPt(h, handle, dx, dy)
+	if !ok {
+		return fyne.Position{}, fyne.Position{}
+	}
+	return pdfRectToWidget(b, widgetSize, pageW, pageH)
+}
+
+// handleResized is every highlightDrawer.OnResized's target: applies the
+// grip drag to the selected shape (Document.ResizeHighlight).
+func (v *view) handleResized(page int, handle resizeHandle, start, end fyne.Position, widgetSize fyne.Size) {
+	h := v.doc.selectedHighlight
+	dx, dy, _, _, ok := v.resizeDeltaPt(page, start, end, widgetSize)
+	if h == nil || !ok {
+		return
+	}
+	v.doc.ResizeHighlight(h, handle, dx, dy)
+	v.highlights.refreshList()
+	v.repaintPage(page)
 }
 
 // handleHighlightMoved is every highlightDrawer.OnMoved's target: converts
@@ -981,7 +1152,9 @@ func (v *view) buildContinuousPages() {
 		page := i + 1
 		drawer := newHighlightDrawer(img)
 		drawer.Enabled = v.drawKind != ""
-		drawer.FreehandMode = v.drawKind == "Ink" || v.drawKind == "PolyLine"
+		drawer.FreehandMode = isFreehandKind(v.drawKind)
+		drawer.ClosePreview = v.drawKind == "Polygon"
+		drawer.TraceStyle = v.traceStyleFor(page)
 		drawer.OnDrawn = func(start, end fyne.Position, size fyne.Size) {
 			v.handleHighlightDrawn(page, start, end, size)
 		}
@@ -996,6 +1169,15 @@ func (v *view) buildContinuousPages() {
 		}
 		drawer.OnMoved = func(start, end fyne.Position, size fyne.Size) {
 			v.handleHighlightMoved(page, start, end, size)
+		}
+		drawer.HitTestHandle = func(pos fyne.Position, size fyne.Size) (resizeHandle, bool) {
+			return v.handleResizeHitTest(page, pos, size)
+		}
+		drawer.ResizeGhost = func(hnd resizeHandle, start, cur fyne.Position, size fyne.Size) (fyne.Position, fyne.Position) {
+			return v.handleResizeGhost(page, hnd, start, cur, size)
+		}
+		drawer.OnResized = func(hnd resizeHandle, start, end fyne.Position, size fyne.Size) {
+			v.handleResized(page, hnd, start, end, size)
 		}
 		drawer.OnFreehandDrawn = func(points []fyne.Position, size fyne.Size) {
 			v.handleFreehandDrawn(page, points, size)
@@ -1091,9 +1273,12 @@ func (v *view) setPanelMode(mode PanelMode) {
 	if mode == PanelNone {
 		v.mainContent.Objects = []fyne.CanvasObject{v.pdfContent}
 	} else {
-		if mode == PanelHighlights {
+		switch mode {
+		case PanelHighlights:
 			v.split.Leading = v.highlights.container
-		} else {
+		case PanelThumbnails:
+			v.split.Leading = v.thumbnails.container
+		default:
 			v.split.Leading = v.panel.container
 		}
 		v.split.Refresh()
@@ -1118,6 +1303,8 @@ func (v *view) setPanelMode(mode PanelMode) {
 		v.panelSelectRef.Selected = "Bookmarks"
 	case PanelHighlights:
 		v.panelSelectRef.Selected = "Highlights and Notes"
+	case PanelThumbnails:
+		v.panelSelectRef.Selected = "Page Thumbnails"
 	default:
 		v.panelSelectRef.Selected = "Show Panel"
 	}
@@ -1125,6 +1312,9 @@ func (v *view) setPanelMode(mode PanelMode) {
 	if mode == PanelTOC || mode == PanelBookmarks {
 		v.panel.rebuildTreeData()
 		v.panel.tree.Refresh()
+	}
+	if mode == PanelThumbnails {
+		v.thumbnails.rebuildRows(true)
 	}
 }
 

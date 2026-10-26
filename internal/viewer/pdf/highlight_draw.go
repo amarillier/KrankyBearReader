@@ -78,14 +78,24 @@ type highlightDrawer struct {
 	// already computes PDF-space geometry there.
 	OnMoved func(start, end fyne.Position, widgetSize fyne.Size)
 
+	// HitTestHandle, if set, is consulted at the start of a drag (while
+	// Enabled is false, before HitTestSelected) to see whether it began on
+	// one of the selected shape's resize grips. ResizeGhost then reports,
+	// in image-local space, the shape's bounding box as it would be if
+	// released at cur (live outline while dragging), and OnResized fires
+	// when the drag ends with the grip plus the gesture's start/end points
+	// (image-local, same space as OnMoved's).
+	HitTestHandle func(pos fyne.Position, widgetSize fyne.Size) (resizeHandle, bool)
+	ResizeGhost   func(handle resizeHandle, start, cur fyne.Position, widgetSize fyne.Size) (tl, br fyne.Position)
+	OnResized     func(handle resizeHandle, start, end fyne.Position, widgetSize fyne.Size)
+
 	// FreehandMode, while Enabled is also true, switches Dragged/DragEnd
 	// from "drag out a rectangle" (OnDrawn, start+end only) to "trace a
 	// freehand path" (OnFreehandDrawn, every sampled point along the
 	// drag) — set by the view alongside Enabled whenever the selected
-	// Draw kind is "Ink" (see setDrawKind). The live overlay still only
-	// ever shows the drag's own bounding-box rectangle, same as every
-	// other kind — see OnFreehandDrawn's own doc comment for why a
-	// kind-accurate live preview isn't needed here either.
+	// Draw kind is "Ink" or "PolyLine" (see setDrawKind). The live
+	// feedback is a point-by-point trace of the stroke (traceLines), not
+	// the bounding-box overlay every rectangle-style kind uses.
 	FreehandMode bool
 
 	// OnFreehandDrawn fires once a freehand drag ends with a non-trivial
@@ -100,10 +110,84 @@ type highlightDrawer struct {
 
 	dragging   bool
 	moving     bool
+	resizing   bool
+	handle     resizeHandle
 	start, cur fyne.Position
 	moveOrigTL fyne.Position
 	moveOrigBR fyne.Position
 	path       []fyne.Position
+
+	// traceLines is the live freehand trace: one short canvas.Line per
+	// sampled segment of the in-progress Ink/PolyLine stroke, shown by the
+	// renderer while the drag is underway and cleared in DragEnd. Line
+	// endpoints are in this widget's own local space, the same space as
+	// d.start/d.cur.
+	traceLines []*canvas.Line
+
+	// ClosePreview, set for the freehand Polygon kind, also shows a faint
+	// line from the pen back to the stroke's start while dragging — what
+	// releasing will close the shape with.
+	ClosePreview bool
+	closeLine    *canvas.Line
+
+	// TraceStyle, if set, supplies the live trace's color and stroke width
+	// (in this widget's own units) for a given displayed page size, so the
+	// trace looks like the shape that will result — the chosen color and
+	// line weight at the page's current on-screen scale — instead of a
+	// fixed thin orange line.
+	TraceStyle func(pageSize fyne.Size) (color.Color, float32)
+}
+
+// traceStyle resolves the trace's color/width for the current page size.
+func (d *highlightDrawer) traceStyle() (color.Color, float32) {
+	if d.TraceStyle != nil {
+		_, size := d.imageLocalPos(d.cur)
+		if c, w := d.TraceStyle(size); w > 0 {
+			return c, w
+		}
+	}
+	return traceStrokeColor, traceStrokeWidth
+}
+
+// traceStrokeColor/traceStrokeWidth style the live freehand trace — a
+// saturated orange, visible against both white pages and dark ones.
+var traceStrokeColor = color.NRGBA{R: 220, G: 80, B: 0, A: 230}
+
+const traceStrokeWidth = 2
+
+// extendTrace adds one segment from a to b to the live trace and asks the
+// widget to repaint so the new segment actually appears.
+func (d *highlightDrawer) extendTrace(a, b fyne.Position) {
+	col, w := d.traceStyle()
+	l := canvas.NewLine(col)
+	l.StrokeWidth = w
+	l.Position1, l.Position2 = a, b
+	d.traceLines = append(d.traceLines, l)
+	d.Refresh()
+}
+
+func (d *highlightDrawer) clearTrace() {
+	if len(d.traceLines) == 0 && d.closeLine == nil {
+		return
+	}
+	d.traceLines = nil
+	d.closeLine = nil
+	d.Refresh()
+}
+
+// updateCloseLine points the faint closing segment from the pen to the
+// stroke's start (ClosePreview only).
+func (d *highlightDrawer) updateCloseLine() {
+	if !d.ClosePreview || len(d.path) == 0 {
+		return
+	}
+	if d.closeLine == nil {
+		col, w := d.traceStyle()
+		d.closeLine = canvas.NewLine(withAlpha(col, 110))
+		d.closeLine.StrokeWidth = w
+	}
+	d.closeLine.Position1, d.closeLine.Position2 = d.cur, d.path[0]
+	d.Refresh()
 }
 
 func newHighlightDrawer(img *canvas.Image) *highlightDrawer {
@@ -165,8 +249,16 @@ func (d *highlightDrawer) Dragged(e *fyne.DragEvent) {
 		d.dragging = true
 		d.start = fyne.NewPos(e.Position.X-e.Dragged.DX, e.Position.Y-e.Dragged.DY)
 		d.moving = false
+		d.resizing = false
 		d.path = nil
-		if !d.Enabled && d.HitTestSelected != nil {
+		if !d.Enabled && d.HitTestHandle != nil {
+			localStart, size := d.imageLocalPos(d.start)
+			if hnd, ok := d.HitTestHandle(localStart, size); ok {
+				d.resizing = true
+				d.handle = hnd
+			}
+		}
+		if !d.Enabled && !d.resizing && d.HitTestSelected != nil {
 			localStart, size := d.imageLocalPos(d.start)
 			if tl, br, ok := d.HitTestSelected(localStart, size); ok {
 				d.moving = true
@@ -185,13 +277,29 @@ func (d *highlightDrawer) Dragged(e *fyne.DragEvent) {
 		// Fyne's first delivered event for this gesture carried zero
 		// initial delta), which would otherwise record the anchor twice.
 		if len(d.path) == 0 || d.path[len(d.path)-1] != d.cur {
+			if n := len(d.path); n > 0 {
+				d.extendTrace(d.path[n-1], d.cur)
+			}
 			d.path = append(d.path, d.cur)
 		}
+		d.updateCloseLine()
 	}
 	switch {
+	case d.Enabled && d.FreehandMode:
+		// The trace above IS the live feedback for a freehand stroke; the
+		// bounding-box overlay every other kind uses would just obscure it.
 	case d.Enabled:
 		d.overlay.Move(rectTopLeft(d.start, d.cur))
 		d.overlay.Resize(rectSize(d.start, d.cur))
+	case d.resizing:
+		if d.ResizeGhost != nil {
+			ls, size := d.imageLocalPos(d.start)
+			lc, _ := d.imageLocalPos(d.cur)
+			tl, br := d.ResizeGhost(d.handle, ls, lc, size)
+			tl, br = d.outerPos(tl), d.outerPos(br)
+			d.overlay.Move(tl)
+			d.overlay.Resize(fyne.NewSize(br.X-tl.X, br.Y-tl.Y))
+		}
 	case d.moving:
 		dx, dy := d.cur.X-d.start.X, d.cur.Y-d.start.Y
 		tl := fyne.NewPos(d.moveOrigTL.X+dx, d.moveOrigTL.Y+dy)
@@ -245,14 +353,37 @@ func (d *highlightDrawer) DragEnd() {
 	d.dragging = false
 	wasMoving := d.moving
 	d.moving = false
+	wasResizing := d.resizing
+	d.resizing = false
 	tl, br := rectTopLeft(d.start, d.cur), rectBottomRight(d.start, d.cur)
 	d.overlay.Resize(fyne.NewSize(0, 0))
+	d.clearTrace()
+
+	// For a freehand stroke the "was this just a click?" test must use the
+	// extent of the WHOLE path, not just start vs. end: a loop finished
+	// right on top of where it began has start == end, which used to be
+	// mistaken for a tap and silently discarded the entire stroke.
+	if d.Enabled && d.FreehandMode && len(d.path) > 1 {
+		tl, br = d.path[0], d.path[0]
+		for _, p := range d.path[1:] {
+			tl = fyne.NewPos(min(tl.X, p.X), min(tl.Y, p.Y))
+			br = fyne.NewPos(max(br.X, p.X), max(br.Y, p.Y))
+		}
+	}
 
 	dx, dy := br.X-tl.X, br.Y-tl.Y
 	if dx < minDragPts && dy < minDragPts {
 		if d.OnTapped != nil {
 			pos, size := d.imageLocalPos(d.cur)
 			d.OnTapped(pos, size)
+		}
+		return
+	}
+	if wasResizing {
+		if d.OnResized != nil {
+			startPos, size := d.imageLocalPos(d.start)
+			endPos, _ := d.imageLocalPos(d.cur)
+			d.OnResized(d.handle, startPos, endPos, size)
 		}
 		return
 	}
@@ -383,9 +514,23 @@ func (r *highlightDrawerRenderer) Layout(size fyne.Size) {
 }
 
 func (r *highlightDrawerRenderer) MinSize() fyne.Size { return r.d.image.MinSize() }
-func (r *highlightDrawerRenderer) Refresh()           {}
+
+// Refresh must ask the canvas to repaint: the live freehand trace adds
+// canvas objects while a drag is underway, and an empty Refresh left the
+// real window showing nothing (the headless software canvas repaints
+// everything on Capture, so tests couldn't see it) — see CLAUDE.md's note
+// on a widget's own Refresh() not marking the canvas dirty.
+func (r *highlightDrawerRenderer) Refresh() { canvas.Refresh(r.d) }
 func (r *highlightDrawerRenderer) Objects() []fyne.CanvasObject {
-	return []fyne.CanvasObject{r.d.image, r.d.overlay}
+	objs := make([]fyne.CanvasObject, 0, 3+len(r.d.traceLines))
+	objs = append(objs, r.d.image, r.d.overlay)
+	if r.d.closeLine != nil {
+		objs = append(objs, r.d.closeLine)
+	}
+	for _, l := range r.d.traceLines {
+		objs = append(objs, l)
+	}
+	return objs
 }
 func (r *highlightDrawerRenderer) Destroy() {}
 
@@ -432,4 +577,11 @@ func pdfRectToWidget(rect [4]float64, widgetSize fyne.Size, pageW, pageH float64
 	topLeft = fyne.NewPos(float32(minX*sx), float32((pageH-maxY)*sy))
 	bottomRight = fyne.NewPos(float32(maxX*sx), float32((pageH-minY)*sy))
 	return topLeft, bottomRight
+}
+
+// withAlpha returns c as an NRGBA with the given alpha.
+func withAlpha(c color.Color, a uint8) color.NRGBA {
+	n := color.NRGBAModel.Convert(c).(color.NRGBA)
+	n.A = a
+	return n
 }

@@ -50,33 +50,48 @@ func drawFreeTextPreview(img *image.RGBA, r image.Rectangle, h *Highlight, pageH
 		tip := [2]float64{h.CalloutTip[0] * scale, (pageHeightPt - h.CalloutTip[1]) * scale}
 		strokeLine(img, anchor, tip, strokePx, col)
 	}
-	drawWrappedText(img, r, h.Contents, col)
+	size := h.FontSize
+	if size <= 0 {
+		size = defaultFontSizePt
+	}
+	drawWrappedText(img, r, h.Contents, col, size*scale)
 }
 
 // drawWrappedText paints text word-wrapped to fit within r (padded by
 // textShapePaddingPx on every side), using golang.org/x/image's own
-// basicfont.Face7x13 — a fixed, already-available bitmap font (Fyne
-// itself depends on golang.org/x/image transitively), good enough for a
+// a scalable Go Regular face at sizePx pixels (previewFace; falls back to
+// basicfont.Face7x13 if it can't be built), good enough for a
 // draw-time preview; the real, saved annotation's own rendering (once
 // MuPDF paints it from the authored /Contents+/DA) isn't tied to this
 // font choice at all. Silently clips any lines past r's own bottom edge
 // rather than growing the box or shrinking the font — a real box-sizing/
 // auto-fit feature is edit-UI scope, not initial drawing.
-func drawWrappedText(img *image.RGBA, r image.Rectangle, text string, col color.NRGBA) {
+func drawWrappedText(img *image.RGBA, r image.Rectangle, text string, col color.NRGBA, sizePx float64) {
 	if text == "" {
 		return
 	}
-	face := basicfont.Face7x13
-	lineHeight := face.Height
+	var face font.Face = basicfont.Face7x13
+	if f, err := previewFace(sizePx); err == nil {
+		face = f
+		defer f.Close()
+	}
+	metrics := face.Metrics()
+	lineHeight := metrics.Height.Ceil()
+	ascent, descent := metrics.Ascent.Ceil(), metrics.Descent.Ceil()
 	maxWidth := r.Dx() - 2*textShapePaddingPx
 	if maxWidth <= 0 {
 		return
 	}
 
 	drawer := &font.Drawer{Dst: img, Src: image.NewUniform(col), Face: face}
-	y := r.Min.Y + textShapePaddingPx + face.Ascent
-	for _, line := range wrapText(text, drawer, maxWidth) {
-		if y+face.Descent > r.Max.Y-textShapePaddingPx {
+	y := r.Min.Y + textShapePaddingPx + ascent
+	for i, line := range wrapText(text, drawer, maxWidth) {
+		// The first line always draws, even when it doesn't fit: MuPDF's
+		// own rendering lets text overflow a too-short box rather than
+		// dropping it, and a preview that shows an empty box (as it did for
+		// an 18pt size change on a 20pt-tall Preview text block) reads as
+		// "the text vanished".
+		if i > 0 && y+descent > r.Max.Y-textShapePaddingPx {
 			break
 		}
 		drawer.Dot = fixed.Point26_6{X: fixed.I(r.Min.X + textShapePaddingPx), Y: fixed.I(y)}

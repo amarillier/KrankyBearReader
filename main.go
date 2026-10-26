@@ -1,10 +1,12 @@
 package main
 
 import (
+	_ "embed"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -19,11 +21,17 @@ import (
 	"reader/internal/viewer"
 )
 
+// The version lives in the VERSION file (build/version.sh X.Y.Z).
+//
+//go:embed VERSION
+var versionFile string
+
+var appVersion = strings.TrimSpace(versionFile)
+
 const (
 	// appName    = "KrankyBear Reader"
-	appVersion = "0.7.0" // see FyneApp.toml
-	appAuthor  = "Allan Marillier"
-	appID      = "com.github.amarillier.KrankyBearReader"
+	appAuthor = "Allan Marillier"
+	appID     = "com.github.amarillier.KrankyBearReader"
 )
 
 var appName = "KrankyBear Reader"
@@ -41,6 +49,10 @@ func buildCopyrightNotice() string {
 func main() {
 	langFlag := flag.String("lang", "", "UI language code (e.g. en, de); overrides the saved preference for this run")
 	mesaFallbackFlag := flag.Bool(startup.MesaFallbackFlagName, false, "internal: relaunch flag for the Mesa3D OpenGL fallback (Windows only)")
+	// Override the Mesa fallback's automatic rasterizer pick (see startup.chooseGalliumDriver): llvmpipe is the fast default,
+	// softpipe the safe one. Accepted on every OS so one command line works everywhere; only acts on Windows.
+	mesaCompatFlag := flag.Bool(startup.MesaCompatFlagName, false, "Windows only: force the Mesa software-OpenGL fallback's safe, slower softpipe rasterizer (use if the app hangs after the first frame on a VM with a conservative virtual CPU, e.g. Proxmox kvm64/qemu64)")
+	mesaPerformanceFlag := flag.Bool(startup.MesaPerformanceFlagName, false, "Windows only: force the fast llvmpipe rasterizer even if this host's CPU looks like a conservative virtual CPU (only once you have confirmed it does not hang)")
 	flag.Parse()
 
 	// Windows only (no-op elsewhere): prefer real hardware OpenGL, falling
@@ -49,7 +61,7 @@ func main() {
 	// only supports one Init/Terminate cycle per process, shared with
 	// Fyne's own driver (see internal/startup/opengl.go, and CLAUDE.md's
 	// "Mesa3D OpenGL fallback" section).
-	startup.EnsureWindowsOpenGLReady(*mesaFallbackFlag)
+	startup.EnsureWindowsOpenGLReady(*mesaFallbackFlag, *mesaCompatFlag, *mesaPerformanceFlag)
 
 	a := app.NewWithID(appID)
 	a.SetIcon(resourceKrankyBearReaderPng)

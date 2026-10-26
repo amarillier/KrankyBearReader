@@ -1,10 +1,12 @@
 package pdf
 
 import (
+	"image/color"
 	"testing"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
+	"fyne.io/fyne/v2/driver/software"
 )
 
 // dragGesture simulates one full click-drag-release gesture (Dragged called
@@ -327,7 +329,7 @@ func TestHighlightDrawer_MoveGhostOverlayTracksDragDelta(t *testing.T) {
 		Dragged:    fyne.Delta{DX: 20, DY: 15},
 	})
 
-	wantPos := fyne.NewPos(60, 55)  // original (40,40) + delta (20,15)
+	wantPos := fyne.NewPos(60, 55)   // original (40,40) + delta (20,15)
 	wantSize := fyne.NewSize(20, 20) // unchanged 20x20 original size
 	if d.overlay.Position() != wantPos {
 		t.Errorf("ghost overlay position = %v, want %v", d.overlay.Position(), wantPos)
@@ -457,4 +459,148 @@ func TestHighlightDrawer_NonFreehandModeStillDrawsRectangle(t *testing.T) {
 	if !drawn || fired {
 		t.Errorf("expected OnDrawn only when FreehandMode is off, got drawn=%v fired=%v", drawn, fired)
 	}
+}
+
+func dragStep(d *highlightDrawer, from, to fyne.Position) {
+	d.Dragged(&fyne.DragEvent{
+		PointEvent: fyne.PointEvent{Position: to},
+		Dragged:    fyne.Delta{DX: to.X - from.X, DY: to.Y - from.Y},
+	})
+}
+
+// The live trace grows by one segment per sampled point while a freehand
+// stroke is underway, and is gone once the gesture ends.
+func TestHighlightDrawer_FreehandTraceGrowsDuringDragAndClearsOnEnd(t *testing.T) {
+	d := newTestHighlightDrawer()
+	d.Enabled = true
+	d.FreehandMode = true
+	d.OnFreehandDrawn = func([]fyne.Position, fyne.Size) {}
+
+	a, b, c := fyne.NewPos(50, 50), fyne.NewPos(55, 60), fyne.NewPos(70, 55)
+	dragStep(d, a, a)
+	if len(d.traceLines) != 0 {
+		t.Fatalf("expected no segments after the anchor point alone, got %d", len(d.traceLines))
+	}
+	dragStep(d, a, b)
+	dragStep(d, b, c)
+	if len(d.traceLines) != 2 {
+		t.Fatalf("expected 2 trace segments after 3 points, got %d", len(d.traceLines))
+	}
+	if l := d.traceLines[1]; l.Position1 != b || l.Position2 != c {
+		t.Errorf("second segment = %v->%v, want %v->%v", l.Position1, l.Position2, b, c)
+	}
+	if sz := d.overlay.Size(); sz.Width != 0 || sz.Height != 0 {
+		t.Errorf("bounding-box overlay should stay hidden during a freehand stroke, got %v", sz)
+	}
+	d.DragEnd()
+	if len(d.traceLines) != 0 {
+		t.Errorf("expected the trace cleared after DragEnd, got %d segments", len(d.traceLines))
+	}
+}
+
+// A rectangle-style draw never builds a trace, and keeps its overlay.
+func TestHighlightDrawer_NonFreehandDrawHasNoTrace(t *testing.T) {
+	d := newTestHighlightDrawer()
+	d.Enabled = true
+	a, b := fyne.NewPos(10, 10), fyne.NewPos(60, 60)
+	dragStep(d, a, a)
+	dragStep(d, a, b)
+	if len(d.traceLines) != 0 {
+		t.Errorf("expected no trace segments outside freehand mode, got %d", len(d.traceLines))
+	}
+	if d.overlay.Size().Width == 0 {
+		t.Error("expected the rectangle overlay to show for a non-freehand draw")
+	}
+	d.DragEnd()
+}
+
+// Renders the drawer through Fyne's real software canvas mid-stroke and
+// looks for the trace's own color — the structural checks above can't tell
+// whether the segments actually get painted (CLAUDE.md: this is the class
+// of bug a headless widget tree can't see).
+func TestHighlightDrawer_FreehandTraceIsActuallyPainted(t *testing.T) {
+	d := newTestHighlightDrawer()
+	d.Enabled = true
+	d.FreehandMode = true
+	c := software.NewCanvas()
+	c.SetContent(d)
+	c.Resize(fyne.NewSize(200, 200))
+	d.Resize(fyne.NewSize(200, 200))
+
+	a, b := fyne.NewPos(20, 20), fyne.NewPos(150, 120)
+	dragStep(d, a, a)
+	dragStep(d, a, b)
+
+	img := c.Capture()
+	found := 0
+	bnds := img.Bounds()
+	for y := bnds.Min.Y; y < bnds.Max.Y; y++ {
+		for x := bnds.Min.X; x < bnds.Max.X; x++ {
+			r, g, bl, _ := img.At(x, y).RGBA()
+			if r>>8 > 180 && g>>8 < 140 && bl>>8 < 60 {
+				found++
+			}
+		}
+	}
+	if found < 50 {
+		t.Errorf("expected the orange trace painted on the canvas, found only %d matching pixels", found)
+	}
+	d.DragEnd()
+}
+
+// Freehand Polygon shows a faint closing segment from the pen back to the
+// start while dragging, and drops it on release.
+func TestHighlightDrawer_ClosePreviewLineFollowsPenAndClears(t *testing.T) {
+	d := newTestHighlightDrawer()
+	d.Enabled, d.FreehandMode, d.ClosePreview = true, true, true
+	a, b := fyne.NewPos(50, 50), fyne.NewPos(90, 60)
+	dragStep(d, a, a)
+	dragStep(d, a, b)
+	if d.closeLine == nil || d.closeLine.Position1 != b || d.closeLine.Position2 != a {
+		t.Fatalf("closing segment should run pen -> start, got %+v", d.closeLine)
+	}
+	d.DragEnd()
+	if d.closeLine != nil {
+		t.Error("closing segment should be cleared after the drag")
+	}
+}
+
+// A freehand loop that ends exactly where it started has start == end; it
+// must still be delivered as a stroke, not swallowed as a tap.
+func TestHighlightDrawer_FreehandLoopEndingOnStartIsNotATap(t *testing.T) {
+	d := newTestHighlightDrawer()
+	d.Enabled, d.FreehandMode = true, true
+	var got []fyne.Position
+	tapped := false
+	d.OnFreehandDrawn = func(p []fyne.Position, _ fyne.Size) { got = p }
+	d.OnTapped = func(fyne.Position, fyne.Size) { tapped = true }
+
+	start := fyne.NewPos(50, 50)
+	freehandGesture(d, start, fyne.NewPos(100, 50), fyne.NewPos(100, 100), fyne.NewPos(50, 100), start)
+	if tapped || len(got) < 4 {
+		t.Errorf("loop closed on its start point: tapped=%v points=%d", tapped, len(got))
+	}
+
+	// A genuine stationary click in freehand mode is still a tap.
+	tapped, got = false, nil
+	freehandGesture(d, start, start)
+	if !tapped || got != nil {
+		t.Errorf("a stationary click must still be a tap: tapped=%v stroke=%v", tapped, got)
+	}
+}
+
+// The live trace takes its color and thickness from TraceStyle (the chosen
+// color and line weight at the page's on-screen scale), not a fixed style.
+func TestHighlightDrawer_TraceUsesTraceStyle(t *testing.T) {
+	d := newTestHighlightDrawer()
+	d.Enabled, d.FreehandMode = true, true
+	want := color.NRGBA{R: 10, G: 20, B: 30, A: 230}
+	d.TraceStyle = func(fyne.Size) (color.Color, float32) { return want, 9 }
+	a, b := fyne.NewPos(10, 10), fyne.NewPos(40, 40)
+	dragStep(d, a, a)
+	dragStep(d, a, b)
+	if len(d.traceLines) != 1 || d.traceLines[0].StrokeWidth != 9 || d.traceLines[0].StrokeColor != want {
+		t.Errorf("trace segment style = %v / %v, want 9 / %v", d.traceLines[0].StrokeWidth, d.traceLines[0].StrokeColor, want)
+	}
+	d.DragEnd()
 }

@@ -22,7 +22,8 @@ bug fixing and performance work.
     delimiter.
   - **Images** (PNG, JPEG, GIF, BMP, WebP) — fit-to-window or 100% view.
   - **PDF** — continuous-scroll or page-by-page reading, zoom (fixed levels
-    or Fit Width/Page), a Table of Contents panel, Bookmarks you can add,
+    or Fit Width/Page), a Table of Contents panel, a Page Thumbnails panel
+    (with an annotated-pages-only filter), Bookmarks you can add,
     rename, and save back into the PDF's standard outline (readable by other
     PDF apps too, and reachable straight from the File menu/tray, not just
     the panel), and a Highlights and Notes panel showing every annotation
@@ -76,6 +77,13 @@ bug fixing and performance work.
   moving `opengl32.dll` and `libgallium_wgl.dll` out of `mesa-fallback`
   and into the same folder as the `.exe` itself skips the one-time
   probe-and-relaunch delay on that machine's very first launch too.
+  The software renderer is Mesa's fast `llvmpipe` by default; on a VM with a
+  conservative virtual CPU (no SSE4.1, e.g. Proxmox kvm64/qemu64) it uses the
+  slower but safe `softpipe` automatically. If the app hangs after the first
+  frame, start it with `-mesa-gl-compat` (or rename
+  `mesa-fallback\.force-mesa-compat.sample` to `.force-mesa-compat`); to
+  force the fast one on such a host, `-mesa-gl-performance`. Help > About
+  shows which renderer is in use.
 
 ## Building & running
 
@@ -93,16 +101,12 @@ Platform helpers: `compile-mac.sh`, `compile-win.sh`, `compile-linux.sh`, and
 
 ## Known limitations
 
-- PDF region bookmarks (an exact scroll position within a page, not just the
-  page itself) aren't preserved when saved back into the PDF — they degrade
-  to page-level bookmarks on save; the exact position is remembered only for
-  the current session.
-- Existing highlights/shapes can be selected, deleted, and (for the kinds
-  this app can itself draw) recolored, but not yet moved, resized, or
-  otherwise edited directly on the page — planned for a future release.
-- A few annotation kinds (Stamp, Ink, PolyLine, Caret) can be viewed,
-  selected, and deleted, but not drawn by this app — anything already
-  saved in a PDF still renders and behaves correctly either way.
+- Existing highlights/shapes (the kinds this app can draw) can be selected,
+  recolored, moved, resized, and deleted; ones it can't fully rebuild (e.g.
+  a Polygon from another app) can be deleted but not moved or resized.
+- Stamp and Caret annotations can be viewed, selected, and deleted, but not
+  drawn by this app — anything already saved in a PDF still renders and
+  behaves correctly either way.
 - Find in Text/Markdown views moves to each match but can't paint a visible
   highlight box around it (the underlying text widgets have no public API
   for that). PDF find's own highlight box is an estimate based on the

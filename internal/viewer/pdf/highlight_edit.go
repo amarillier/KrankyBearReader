@@ -43,7 +43,7 @@ func (d *Document) AddHighlight(page int, quads [][8]float64, rgb [3]float64, ca
 	}
 	d.Highlights = append(d.Highlights, h)
 	sort.SliceStable(d.Highlights, func(i, j int) bool { return d.Highlights[i].Page < d.Highlights[j].Page })
-	d.cache.Clear()
+	d.invalidateRender()
 	return h
 }
 
@@ -75,7 +75,7 @@ func (d *Document) AddMarkupShape(page int, kind string, quads [][8]float64, rgb
 func (d *Document) addShape(h *Highlight) *Highlight {
 	d.Highlights = append(d.Highlights, h)
 	sort.SliceStable(d.Highlights, func(i, j int) bool { return d.Highlights[i].Page < d.Highlights[j].Page })
-	d.cache.Clear()
+	d.invalidateRender()
 	return h
 }
 
@@ -162,7 +162,7 @@ func (d *Document) AddPolyLineShape(page int, points [][2]float64, rgb [3]float6
 // runs; the returned Highlight has ObjNr == 0 until then, same as every
 // other Add* method.
 func (d *Document) AddTextShape(page int, rect [4]float64, calloutTip *[2]float64, caption string, rgb [3]float64) *Highlight {
-	return d.addShape(&Highlight{Page: page, Kind: "FreeText", Rect: rect, CalloutTip: calloutTip, Contents: caption, Color: rgb})
+	return d.addShape(&Highlight{Page: page, Kind: "FreeText", Rect: rect, CalloutTip: calloutTip, Contents: caption, Color: rgb, FontSize: defaultFontSizePt})
 }
 
 // DeleteHighlight removes h — geometry, color, caption, all of it —
@@ -198,7 +198,7 @@ func (d *Document) DeleteHighlight(h *Highlight) bool {
 			// either way, just without the immediate re-render.
 			_ = d.rebuildDoc()
 		}
-		d.cache.Clear()
+		d.invalidateRender()
 		return true
 	}
 	return false
@@ -447,7 +447,7 @@ func (d *Document) SaveHighlights(outputPath string) error {
 			continue
 		}
 		_, colorChanged, lineWidthChanged, geometryChanged := highlightDictChanges(h)
-		if !colorChanged && !lineWidthChanged && !geometryChanged {
+		if !colorChanged && !lineWidthChanged && !fontSizeChanged(h) && !geometryChanged {
 			continue
 		}
 		if ann := newAnnotationForShape(h); ann != nil {
@@ -506,6 +506,11 @@ func (d *Document) SaveHighlights(outputPath string) error {
 			return fmt.Errorf("adding highlight p.%d %s: %w", h.Page, h.Kind, err)
 		}
 		h.ObjNr = ref.ObjectNumber.Value()
+		if hasFontSize(h.Kind) {
+			if err := applyFreeTextFontSize(ctx, ref, h.FontSize); err != nil {
+				return fmt.Errorf("setting text size p.%d %s: %w", h.Page, h.Kind, err)
+			}
+		}
 	}
 
 	// Deliberately NOT calling api.OptimizeContext here — see CLAUDE.md.
@@ -573,7 +578,7 @@ func (d *Document) SaveHighlights(outputPath string) error {
 		// the one page they know they changed, just for every page at
 		// once, since a save can change what's on any of them, not just
 		// the highlights this app knows it edited.
-		d.cache.Clear()
+		d.invalidateRender()
 	}
 	return nil
 }
@@ -739,7 +744,7 @@ func (d *Document) SetHighlightColor(h *Highlight, rgb [3]float64) {
 	if h.ObjNr > 0 {
 		_ = d.rebuildDoc()
 	}
-	d.cache.Clear()
+	d.invalidateRender()
 }
 
 // SetHighlightLineWidth updates h's in-memory stroke/border width (PDF
@@ -759,7 +764,27 @@ func (d *Document) SetHighlightLineWidth(h *Highlight, widthPt float64) {
 	if h.ObjNr > 0 {
 		_ = d.rebuildDoc()
 	}
-	d.cache.Clear()
+	d.invalidateRender()
+}
+
+// SetHighlightFontSize updates h's text size (PDF points — see
+// Highlight.FontSize), mirroring SetHighlightLineWidth: rebuild the render
+// copy for an already-saved highlight so the hand-painted replacement shows
+// immediately. Callers have already checked hasFontSize(h.Kind).
+func (d *Document) SetHighlightFontSize(h *Highlight, sizePt float64) {
+	h.FontSize = sizePt
+	// A bigger size can overflow a snug box (a Preview text block is sized
+	// to its text) — grow it to fit, best effort. The Rect change must be
+	// persisted like a move, hence geometryMoved.
+	before := h.Rect
+	growFreeTextToFit(h)
+	if h.Rect != before {
+		h.geometryMoved = true
+	}
+	if h.ObjNr > 0 {
+		_ = d.rebuildDoc()
+	}
+	d.invalidateRender()
 }
 
 // canMoveHighlight reports whether h's geometry can actually be
@@ -841,7 +866,7 @@ func (d *Document) MoveHighlight(h *Highlight, dxPt, dyPt float64) {
 	if h.ObjNr > 0 {
 		_ = d.rebuildDoc()
 	}
-	d.cache.Clear()
+	d.invalidateRender()
 }
 
 // rgbToSimpleColor converts our internal 0..1 RGB representation
@@ -1011,7 +1036,14 @@ func newAnnotationForShape(h *Highlight) model.AnnotationRenderer {
 		// here. See drawFreeTextPreview's own doc comment for why the
 		// in-app preview also deliberately keeps the border, rather than
 		// looking different from what Save will actually produce.
-		return model.NewFreeTextAnnotation(*rect, 0, h.Contents, "", "", 0, &col, "", nil, nil, "", "",
+		// The annotation's own /C is deliberately omitted (nil), with the
+		// color carried by /DA's rg alone (pdfcpu's fontCol): confirmed by
+		// rendering the saved file with MuPDF that a FreeText WITH /C gets
+		// its whole box filled in that color — and the text, drawn in the
+		// same color, vanishes into it. Without /C, MuPDF draws a border
+		// plus the text, both in the /DA color. freeTextStyle reads the
+		// color back from /DA on load.
+		return model.NewFreeTextAnnotation(*rect, 0, h.Contents, "", "", 0, nil, "", nil, nil, "", "",
 			"", types.AlignLeft, "", 0, &col, "", intent, callOutLine, nil, 0, 0, 0, 0, defaultShapeBorderWidthPt, model.BSSolid, false, 0)
 
 	default:

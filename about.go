@@ -2,10 +2,13 @@ package main
 
 import (
 	"net/url"
+	"runtime"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
+	"reader/internal/startup"
 )
 
 var aboutWindow fyne.Window
@@ -91,6 +94,15 @@ func showAbout(a fyne.App) {
 	githubLink := widget.NewHyperlink("GitHub Repository", githubURL)
 	githubLink.Alignment = fyne.TextAlignCenter
 
+	// Windows only: which OpenGL path this launch uses (hardware, or the Mesa3D software fallback and its rasterizer).
+	var renderingRow fyne.CanvasObject = layout.NewSpacer()
+	if runtime.GOOS == "windows" {
+		credit := widget.NewLabel("The Windows package includes Mesa 3D (MIT and other licences) as a software OpenGL fallback: see mesa-fallback\\MESA-NOTICE.txt.")
+		credit.Wrapping = fyne.TextWrapWord
+		credit.Alignment = fyne.TextAlignCenter
+		renderingRow = container.NewVBox(container.NewCenter(widget.NewLabel(renderingStatusText())), credit)
+	}
+
 	// Layout
 	content := container.NewVBox(
 		container.NewCenter(iconRow),
@@ -101,6 +113,7 @@ func showAbout(a fyne.App) {
 		widget.NewSeparator(),
 		copyright,
 		author,
+		renderingRow,
 		widget.NewSeparator(),
 		container.NewCenter(licenseLink),
 		container.NewCenter(githubLink),
@@ -121,3 +134,16 @@ func showAbout(a fyne.App) {
 }
 
 // "Now this is not the end. It is not even the beginning of the end. But it is, perhaps, the end of the beginning." Winston Churchill, November 10, 1942
+
+// renderingStatusText reports which OpenGL path this launch uses: real hardware, or the bundled Mesa3D software fallback with
+// the rasterizer (llvmpipe fast / softpipe safe) and the pinned Mesa version when known.
+func renderingStatusText() string {
+	active, version, driver := startup.MesaFallbackActive()
+	if !active {
+		return "Rendering: hardware OpenGL"
+	}
+	if version == "" {
+		return "Rendering: Mesa3D software OpenGL (" + driver + ")"
+	}
+	return "Rendering: Mesa3D software OpenGL (" + driver + ", Mesa " + version + ")"
+}
