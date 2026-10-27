@@ -25,26 +25,20 @@ const textShapePaddingPx = 4
 // saved FreeText still relies entirely on MuPDF's own rendering; this is
 // preview-only.
 //
-// Always draws the border, even for a plain text block — see
-// newAnnotationForShape's own doc comment on why: Preview's own
-// borderless "Text" tool works by baking a custom appearance stream with
-// no border path in it at all, and MuPDF's own default-appearance
-// synthesis (what this app's authored, no-baked-/AP FreeText relies on)
-// draws a border unconditionally, confirmed empirically to ignore /BS's
-// width (0 or absent both still show one) — there's no parameter to omit
-// it via the authoring path pdfcpu exposes. Keeping the preview
-// borderED here too, rather than borderless, is deliberate: a borderless
-// preview that gains a border the instant Save runs (once MuPDF's own
-// rendering takes over) would be a worse, more confusing inconsistency
-// than just not matching Preview's own style at all.
+// A plain text block (no CalloutTip) is borderless, matching Preview's own
+// "Text" tool: SaveHighlights writes an explicit /BS /W 0 for it
+// (applyFreeTextNoBorder), which MuPDF honours — only an ABSENT /BS falls
+// back to a 1pt border. A speech bubble keeps its border, since the box is
+// the bubble's own outline.
 func drawFreeTextPreview(img *image.RGBA, r image.Rectangle, h *Highlight, pageHeightPt, scale float64, col color.NRGBA) {
 	// Always defaultShapeBorderWidthPt, never h.LineWidth — FreeText is
 	// deliberately excluded from hasLineWidth (see its own doc comment):
-	// MuPDF ignores /BS's width for a FreeText with no baked /AP
-	// regardless of value, so a configurable width here would silently
-	// diverge from what Save actually produces.
+	// a configurable width here would silently diverge from what Save
+	// produces (fixed 1pt for a bubble, none for a plain block).
 	strokePx := float64(shapeStrokeWidthPx(defaultShapeBorderWidthPt, scale))
-	drawRectOutline(img, r, col, int(strokePx))
+	if h.Bordered || h.CalloutTip != nil {
+		drawRectOutline(img, r, col, int(strokePx))
+	}
 	if h.CalloutTip != nil {
 		anchor := [2]float64{float64(r.Min.X), float64(r.Max.Y)} // the box's own bottom-left corner, matching calloutTipFor's own anchor choice
 		tip := [2]float64{h.CalloutTip[0] * scale, (pageHeightPt - h.CalloutTip[1]) * scale}

@@ -77,15 +77,18 @@ type Document struct {
 	textCacheMu sync.Mutex
 	textCache   map[int]string // page -> extracted text, filled lazily by PageText
 
+	charCacheMu sync.Mutex
+	charCache   map[int][]fitz.TextChar // page -> characters with exact quads, filled lazily by pageChars
+
 	lineCacheMu sync.Mutex
 	lineCache   map[int][]textLine // page -> HTML-derived line positions, filled lazily by pageTextLines
 
-	// searchHighlightPage/Rect mark the find bar's current match's
-	// approximate on-page box (PDF-space, origin bottom-left, same
-	// convention as Highlight.Rect) for paintHighlights to draw — see
-	// SetSearchHighlight. Page 0 means "none".
-	searchHighlightPage int
-	searchHighlightRect [4]float64
+	// searchHighlightPage/Rects mark the find bar's current match's boxes
+	// (PDF-space, origin bottom-left, same convention as Highlight.Rect;
+	// one per line the match covers) for paintHighlights to draw — see
+	// SetSearchHighlights. Page 0 means "none".
+	searchHighlightPage  int
+	searchHighlightRects [][4]float64
 }
 
 // Prepare opens path and loads its page count and bookmarks/TOC. Safe to run
@@ -373,7 +376,7 @@ func (d *Document) buildNormalizedDoc() (*fitz.Document, string, error) {
 		// highlightsPanel's own changeSelectedColor/changeSelectedLineWidth
 		// for the transient notice shown when this applies.
 		_, colorChanged, lineWidthChanged, geometryChanged := highlightDictChanges(h)
-		if (colorChanged || lineWidthChanged || fontSizeChanged(h) || geometryChanged) && newAnnotationForShape(h) != nil {
+		if (colorChanged || lineWidthChanged || freeTextStyleChanged(h) || geometryChanged) && newAnnotationForShape(h) != nil {
 			removeObjNrs = append(removeObjNrs, h.ObjNr)
 		}
 	}

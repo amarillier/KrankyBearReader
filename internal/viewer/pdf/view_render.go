@@ -422,6 +422,20 @@ var defaultArrowEndStyle = [2]string{"None", "ClosedArrow"}
 // PDF) need to paint them correctly before Save, and all
 // newAnnotationForShape needs to author the right annotation subtype on
 // Save.
+// markupQuads is the quads for a Highlight/Underline/Strikeout/Squiggly
+// dragged from start to end: snapped to the text under the drag (one quad
+// per line, like selecting text in Preview/Acrobat) when both ends are on
+// or near text, otherwise the plain dragged rectangle — so marking up a
+// figure or blank area still works exactly as before.
+func (v *view) markupQuads(page int, start, end fyne.Position, widgetSize fyne.Size, pageW, pageH float64) [][8]float64 {
+	x1, y1 := widgetPointToPDF(start, widgetSize, pageW, pageH)
+	x2, y2 := widgetPointToPDF(end, widgetSize, pageW, pageH)
+	if quads, ok := v.doc.SnapTextSelection(page, x1, y1, x2, y2); ok {
+		return quads
+	}
+	return [][8]float64{widgetRectToQuad(rectTopLeft(start, end), rectBottomRight(start, end), widgetSize, pageW, pageH)}
+}
+
 func (v *view) handleHighlightDrawn(page int, start, end fyne.Position, widgetSize fyne.Size) {
 	pageW, pageH, err := v.doc.PageBoundsPt(page)
 	if err != nil {
@@ -429,8 +443,7 @@ func (v *view) handleHighlightDrawn(page int, start, end fyne.Position, widgetSi
 	}
 	switch v.drawKind {
 	case "Underline", "Strikeout", "Squiggly":
-		quad := widgetRectToQuad(rectTopLeft(start, end), rectBottomRight(start, end), widgetSize, pageW, pageH)
-		v.doc.AddMarkupShape(page, v.drawKind, [][8]float64{quad}, v.highlightColor)
+		v.doc.AddMarkupShape(page, v.drawKind, v.markupQuads(page, start, end, widgetSize, pageW, pageH), v.highlightColor)
 	case "Line":
 		x1, y1 := widgetPointToPDF(start, widgetSize, pageW, pageH)
 		x2, y2 := widgetPointToPDF(end, widgetSize, pageW, pageH)
@@ -450,7 +463,7 @@ func (v *view) handleHighlightDrawn(page int, start, end fyne.Position, widgetSi
 			vertices = starVertices(cx, cy, rx, ry)
 		}
 		v.doc.AddPolygonShape(page, vertices, v.highlightColor, v.lineWidthPt)
-	case "Text", "Speech Bubble":
+	case "Text", "Boxed Text", "Speech Bubble":
 		// Unlike every other kind, this one needs a caption before
 		// there's anything to add at all — promptForShapeText creates
 		// the shape (and does its own refreshList/repaintPage) only on
@@ -460,11 +473,10 @@ func (v *view) handleHighlightDrawn(page int, start, end fyne.Position, widgetSi
 		x1, y1 := widgetPointToPDF(start, widgetSize, pageW, pageH)
 		x2, y2 := widgetPointToPDF(end, widgetSize, pageW, pageH)
 		rect := [4]float64{min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)}
-		v.promptForShapeText(page, rect, v.drawKind == "Speech Bubble")
+		v.promptForShapeText(page, rect, v.drawKind)
 		return
 	default: // "Highlight", and the fallback for any unrecognized drawKind
-		quad := widgetRectToQuad(rectTopLeft(start, end), rectBottomRight(start, end), widgetSize, pageW, pageH)
-		v.doc.AddHighlight(page, [][8]float64{quad}, v.highlightColor, "")
+		v.doc.AddHighlight(page, v.markupQuads(page, start, end, widgetSize, pageW, pageH), v.highlightColor, "")
 	}
 	v.highlights.refreshList()
 	v.repaintPage(page)
@@ -629,12 +641,16 @@ func starVertices(cx, cy, rx, ry float64) [][2]float64 {
 // cancelling, or confirming blank, leaves no phantom empty annotation
 // behind, matching AddHighlight-family methods' own "nothing reaches
 // d.Highlights until there's something real to add" convention.
-func (v *view) promptForShapeText(page int, rect [4]float64, speechBubble bool) {
+func (v *view) promptForShapeText(page int, rect [4]float64, kind string) {
+	speechBubble := kind == "Speech Bubble"
 	entry := widget.NewMultiLineEntry()
 	entry.SetPlaceHolder("Text...")
 	title := "Add Text Block"
-	if speechBubble {
+	switch kind {
+	case "Speech Bubble":
 		title = "Add Speech Bubble"
+	case "Boxed Text":
+		title = "Add Boxed Text"
 	}
 	d := dialog.NewCustomConfirm(title, "Add", "Cancel", entry, func(ok bool) {
 		if !ok || entry.Text == "" {
@@ -645,7 +661,10 @@ func (v *view) promptForShapeText(page int, rect [4]float64, speechBubble bool) 
 			t := calloutTipFor(rect)
 			tip = &t
 		}
-		v.doc.AddTextShape(page, rect, tip, entry.Text, v.highlightColor)
+		h := v.doc.AddTextShape(page, rect, tip, entry.Text, v.highlightColor)
+		if kind == "Boxed Text" {
+			h.Bordered = true
+		}
 		v.highlights.refreshList()
 		v.repaintPage(page)
 	}, v.win)
@@ -851,7 +870,7 @@ func (v *view) handleHighlightSecondaryTapped(page int, pos fyne.Position, widge
 var rightClickQuickShapeKinds = []string{
 	"Underline", "Strikeout", "Squiggly",
 	"Square", "Circle", "Line",
-	"Star", "Hexagon", "Text", "Speech Bubble",
+	"Star", "Hexagon", "Text", "Boxed Text", "Speech Bubble",
 }
 
 // showEmptySpaceContextMenu is handleHighlightSecondaryTapped's "the
@@ -935,7 +954,7 @@ func (v *view) addShapeAt(page int, pos fyne.Position, widgetSize fyne.Size, kin
 	switch kind {
 	case "Highlight", "Underline", "Strikeout", "Squiggly":
 		halfW, halfH = rightClickMarkupHalfWidthPt, rightClickMarkupHalfHeightPt
-	case "Text", "Speech Bubble":
+	case "Text", "Boxed Text", "Speech Bubble":
 		halfW, halfH = rightClickTextHalfWidthPt, rightClickTextHalfHeightPt
 	}
 	rect := centeredRectClamped(cx, cy, halfW, halfH, pageW, pageH)
@@ -956,13 +975,13 @@ func (v *view) addShapeAt(page int, pos fyne.Position, widgetSize fyne.Size, kin
 			vertices = starVertices(cx, cy, rx, ry)
 		}
 		v.doc.AddPolygonShape(page, vertices, v.highlightColor, v.lineWidthPt)
-	case "Text", "Speech Bubble":
+	case "Text", "Boxed Text", "Speech Bubble":
 		// Unlike every other kind, creation itself waits for the user to
 		// confirm a caption (see handleHighlightDrawn's own identical
 		// case) — promptForShapeText does its own refreshList/repaintPage
 		// on confirm, so return here rather than falling through to the
 		// unconditional refresh/repaint below.
-		v.promptForShapeText(page, rect, kind == "Speech Bubble")
+		v.promptForShapeText(page, rect, kind)
 		return
 	default: // "Highlight"
 		quad := [8]float64{x1, y2, x2, y2, x1, y1, x2, y1}

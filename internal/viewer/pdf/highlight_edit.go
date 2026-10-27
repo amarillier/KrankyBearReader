@@ -162,7 +162,7 @@ func (d *Document) AddPolyLineShape(page int, points [][2]float64, rgb [3]float6
 // runs; the returned Highlight has ObjNr == 0 until then, same as every
 // other Add* method.
 func (d *Document) AddTextShape(page int, rect [4]float64, calloutTip *[2]float64, caption string, rgb [3]float64) *Highlight {
-	return d.addShape(&Highlight{Page: page, Kind: "FreeText", Rect: rect, CalloutTip: calloutTip, Contents: caption, Color: rgb, FontSize: defaultFontSizePt})
+	return d.addShape(&Highlight{Page: page, Kind: "FreeText", Rect: rect, CalloutTip: calloutTip, Contents: caption, Color: rgb, FontSize: defaultFontSizePt, Bordered: calloutTip != nil})
 }
 
 // DeleteHighlight removes h — geometry, color, caption, all of it —
@@ -447,7 +447,7 @@ func (d *Document) SaveHighlights(outputPath string) error {
 			continue
 		}
 		_, colorChanged, lineWidthChanged, geometryChanged := highlightDictChanges(h)
-		if !colorChanged && !lineWidthChanged && !fontSizeChanged(h) && !geometryChanged {
+		if !colorChanged && !lineWidthChanged && !freeTextStyleChanged(h) && !geometryChanged {
 			continue
 		}
 		if ann := newAnnotationForShape(h); ann != nil {
@@ -509,6 +509,11 @@ func (d *Document) SaveHighlights(outputPath string) error {
 		if hasFontSize(h.Kind) {
 			if err := applyFreeTextFontSize(ctx, ref, h.FontSize); err != nil {
 				return fmt.Errorf("setting text size p.%d %s: %w", h.Page, h.Kind, err)
+			}
+			if !h.Bordered {
+				if err := applyFreeTextNoBorder(ctx, ref); err != nil {
+					return fmt.Errorf("removing text block border p.%d %s: %w", h.Page, h.Kind, err)
+				}
 			}
 		}
 	}
@@ -767,10 +772,23 @@ func (d *Document) SetHighlightLineWidth(h *Highlight, widthPt float64) {
 	d.invalidateRender()
 }
 
+// SetHighlightBordered turns a FreeText's box outline on or off (see
+// Highlight.Bordered), rebuilding the render copy for an already-saved one
+// so the change shows immediately. Callers have already checked
+// hasFontSize(h.Kind).
+func (d *Document) SetHighlightBordered(h *Highlight, bordered bool) {
+	h.Bordered = bordered
+	if h.ObjNr > 0 {
+		_ = d.rebuildDoc()
+	}
+	d.invalidateRender()
+}
+
 // SetHighlightFontSize updates h's text size (PDF points — see
 // Highlight.FontSize), mirroring SetHighlightLineWidth: rebuild the render
 // copy for an already-saved highlight so the hand-painted replacement shows
-// immediately. Callers have already checked hasFontSize(h.Kind).
+// immediately, growing the box if the text no longer fits. Callers have
+// already checked hasFontSize(h.Kind).
 func (d *Document) SetHighlightFontSize(h *Highlight, sizePt float64) {
 	h.FontSize = sizePt
 	// A bigger size can overflow a snug box (a Preview text block is sized
@@ -911,18 +929,14 @@ func newAnnotationForShape(h *Highlight) model.AnnotationRenderer {
 		if len(h.Quads) == 0 {
 			return nil
 		}
-		minX, minY, maxX, maxY := quadBoundsPt(h.Quads[0])
-		rect := types.NewRectangle(minX, minY, maxX, maxY)
-		quad := types.QuadPoints{*types.NewQuadLiteralForRect(rect)}
+		rect, quad := quadsRectAndPoints(h.Quads)
 		return model.NewHighlightAnnotation(*rect, 0, h.Contents, "", "", 0, &col, 0, 0, 0, "", nil, nil, "", "", quad)
 
 	case "Underline", "Strikeout", "Squiggly":
 		if len(h.Quads) == 0 {
 			return nil
 		}
-		minX, minY, maxX, maxY := quadBoundsPt(h.Quads[0])
-		rect := types.NewRectangle(minX, minY, maxX, maxY)
-		quad := types.QuadPoints{*types.NewQuadLiteralForRect(rect)}
+		rect, quad := quadsRectAndPoints(h.Quads)
 		switch h.Kind {
 		case "Underline":
 			return model.NewUnderlineAnnotation(*rect, 0, h.Contents, "", "", 0, &col, 0, 0, 0, "", nil, nil, "", "", quad)
@@ -1022,20 +1036,10 @@ func newAnnotationForShape(h *Highlight) model.AnnotationRenderer {
 			it := model.IntentFreeTextCallout
 			intent = &it
 		}
-		// borderWidth is always defaultShapeBorderWidthPt, even for a
-		// plain text block — NOT because a plain text block should have
-		// a visible border (Preview's own default "Text" tool has none),
-		// but because setting it to 0 (omitting /BS entirely) turned out
-		// to have NO effect on MuPDF's own rendering: confirmed
-		// empirically that MuPDF draws a border around a FreeText with
-		// no baked /AP unconditionally, regardless of /BS's presence or
-		// width. Preview achieves its own borderless look by baking a
-		// custom appearance stream with no border path at all — a much
-		// bigger authoring effort (real content-stream + font-resource
-		// authoring) than a border-width parameter, and not attempted
-		// here. See drawFreeTextPreview's own doc comment for why the
-		// in-app preview also deliberately keeps the border, rather than
-		// looking different from what Save will actually produce.
+		// borderWidth is always defaultShapeBorderWidthPt here: pdfcpu omits
+		// /BS at width 0, and an absent /BS means a 1pt border to MuPDF.
+		// A borderless block (Highlight.Bordered false) gets its explicit
+		// /BS /W 0 patched in by SaveHighlights (applyFreeTextNoBorder).
 		// The annotation's own /C is deliberately omitted (nil), with the
 		// color carried by /DA's rg alone (pdfcpu's fontCol): confirmed by
 		// rendering the saved file with MuPDF that a FreeText WITH /C gets
@@ -1049,6 +1053,27 @@ func newAnnotationForShape(h *Highlight) model.AnnotationRenderer {
 	default:
 		return nil
 	}
+}
+
+// quadsRectAndPoints builds the /Rect (union of every quad's bounds) and
+// /QuadPoints (one literal per quad, in the UL, UR, LL, LR order
+// Highlight.Quads and pdfcpu's own QuadLiteral share) for a markup
+// annotation. Every quad is written — a text-snapped selection covering
+// several lines has one per line, and only writing the first used to
+// silently drop the rest on Save.
+func quadsRectAndPoints(quads [][8]float64) (*types.Rectangle, types.QuadPoints) {
+	minX, minY, maxX, maxY := quadBoundsPt(quads[0])
+	points := make(types.QuadPoints, 0, len(quads))
+	for _, q := range quads {
+		qMinX, qMinY, qMaxX, qMaxY := quadBoundsPt(q)
+		minX, minY = min(minX, qMinX), min(minY, qMinY)
+		maxX, maxY = max(maxX, qMaxX), max(maxY, qMaxY)
+		points = append(points, types.QuadLiteral{
+			P1: types.Point{X: q[0], Y: q[1]}, P2: types.Point{X: q[2], Y: q[3]},
+			P3: types.Point{X: q[4], Y: q[5]}, P4: types.Point{X: q[6], Y: q[7]},
+		})
+	}
+	return types.NewRectangle(minX, minY, maxX, maxY), points
 }
 
 // lineEndingStyleFromName maps the PDF /LE name strings this app already

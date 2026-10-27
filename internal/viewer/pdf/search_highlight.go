@@ -3,6 +3,7 @@ package pdf
 import (
 	"html"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -228,21 +229,30 @@ func (d *Document) SearchMatchRect(page int, query string, useRegex bool, occurr
 	return [4]float64{}, false
 }
 
-// SetSearchHighlight marks (page, rect) as the current find-bar match's
-// approximate on-page box for paintHighlights to draw — mirrors
-// SetSelectedHighlight's own pattern, including clearing the whole render
-// cache rather than just the affected page (see that method's own doc
-// comment for why). Page 0 clears it.
-func (d *Document) SetSearchHighlight(page int, rect [4]float64) {
-	if d.searchHighlightPage == page && d.searchHighlightRect == rect {
+// SetSearchHighlights marks (page, rects) as the current find-bar match's
+// on-page boxes (one per line it covers) for paintHighlights to draw —
+// mirrors SetSelectedHighlight's own pattern, including clearing the whole
+// render cache rather than just the affected page (see that method's own
+// doc comment for why). Page 0 or no rects clears it.
+func (d *Document) SetSearchHighlights(page int, rects [][4]float64) {
+	if d.searchHighlightPage == page && slices.Equal(d.searchHighlightRects, rects) {
 		return
 	}
 	d.searchHighlightPage = page
-	d.searchHighlightRect = rect
+	d.searchHighlightRects = rects
 	d.cache.Clear()
+}
+
+// SetSearchHighlight is SetSearchHighlights for a single box.
+func (d *Document) SetSearchHighlight(page int, rect [4]float64) {
+	if rect == [4]float64{} {
+		d.SetSearchHighlights(0, nil)
+		return
+	}
+	d.SetSearchHighlights(page, [][4]float64{rect})
 }
 
 // ClearSearchHighlight removes any current search highlight box.
 func (d *Document) ClearSearchHighlight() {
-	d.SetSearchHighlight(0, [4]float64{})
+	d.SetSearchHighlights(0, nil)
 }

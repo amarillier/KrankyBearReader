@@ -232,7 +232,7 @@ func TestHandleHighlightDrawn_TextKindsDeferToDialog(t *testing.T) {
 	}
 	widgetSize := fyne.NewSize(float32(pageW), float32(pageH))
 
-	for _, kind := range []string{"Text", "Speech Bubble"} {
+	for _, kind := range []string{"Text", "Boxed Text", "Speech Bubble"} {
 		before := len(v.doc.Highlights)
 		v.drawKind = kind
 		v.handleHighlightDrawn(1, fyne.NewPos(20, 10), fyne.NewPos(80, 60), widgetSize)

@@ -169,6 +169,14 @@ type Highlight struct {
 	// applyFreeTextFontSize). origFontSize snapshots it like origLineWidth.
 	FontSize     float64
 	origFontSize float64
+
+	// Bordered is whether a FreeText draws its box outline, meaningful only
+	// for a hasFontSize kind. A plain Text block is borderless, a Boxed Text
+	// and a Speech Bubble are bordered. Read back from /BS (/CL counts as
+	// bordered; a baked /AP with no /BS counts as borderless) and written via
+	// /BS on save (see applyFreeTextBorder). origBordered snapshots it.
+	Bordered     bool
+	origBordered bool
 }
 
 // highlightKinds are the annotation types worth listing, and their display
@@ -342,8 +350,10 @@ func flattenHighlights(xRefTable *model.XRefTable, pgAnnots map[int]model.PgAnno
 					if colorOK {
 						h.Color = col
 					}
+					h.Bordered = freeTextBordered(xRefTable, objNr)
 				}
 				h.origContents, h.origColor, h.origLineWidth, h.origFontSize = h.Contents, h.Color, h.LineWidth, h.FontSize
+				h.origBordered = h.Bordered
 				out = append(out, h)
 			}
 		}
@@ -746,7 +756,7 @@ func (d *Document) paintHighlightsOpt(img *image.RGBA, page int, dpi float64, wi
 		// it's a UI affordance over an already-rendered page, not
 		// something MuPDF has any notion of.
 		_, colorChanged, lineWidthChanged, geometryChanged := highlightDictChanges(h)
-		needsHandPaint := h.ObjNr == 0 || ((colorChanged || lineWidthChanged || fontSizeChanged(h) || geometryChanged) && newAnnotationForShape(h) != nil)
+		needsHandPaint := h.ObjNr == 0 || ((colorChanged || lineWidthChanged || freeTextStyleChanged(h) || geometryChanged) && newAnnotationForShape(h) != nil)
 
 		if hasGenericRect {
 			// Square/Circle/Polygon/FreeText/Ink are the kinds this app can
@@ -864,7 +874,7 @@ func (d *Document) paintHighlightsOpt(img *image.RGBA, page int, dpi float64, wi
 		}
 	}
 
-	if withSelection && d.searchHighlightPage == page && d.searchHighlightRect != [4]float64{} {
+	if withSelection && d.searchHighlightPage == page && len(d.searchHighlightRects) > 0 {
 		if !haveBounds {
 			_, height, err := d.PageBoundsPt(page)
 			if err != nil {
@@ -873,9 +883,11 @@ func (d *Document) paintHighlightsOpt(img *image.RGBA, page int, dpi float64, wi
 			pageHeightPt = height
 			haveBounds = true
 		}
-		r := rectPixelRect(d.searchHighlightRect, pageHeightPt, scale)
-		drawTranslucentRect(img, r, searchHighlightFillColor)
-		drawRectOutline(img, r, searchHighlightOutlineColor, selectionOutlineWidth)
+		for _, rect := range d.searchHighlightRects {
+			r := rectPixelRect(rect, pageHeightPt, scale)
+			drawTranslucentRect(img, r, searchHighlightFillColor)
+			drawRectOutline(img, r, searchHighlightOutlineColor, selectionOutlineWidth)
+		}
 	}
 }
 

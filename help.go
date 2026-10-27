@@ -87,9 +87,11 @@ PDF VIEWING:
   Circle, Polygon, FreeText, Stamp, Ink, and more).
 • Draw: pick a kind from the toolbar's "Draw: ..." dropdown (Highlight,
   Underline, Strikeout, Squiggly, Square, Circle, Line, Star, Hexagon,
-  Text, Speech Bubble, Ink, PolyLine), pick a line weight from the
+  Text, Boxed Text, Speech Bubble, Ink, PolyLine), pick a line weight from the
   dropdown next to it (Square/Circle/Line/Polygon/Ink/PolyLine only —
-  meaningless for the others), then drag on the page to add it. Text and
+  meaningless for the others), then drag on the page to add it
+  (Highlight/Underline/Strikeout/Squiggly snap to the text you drag across,
+  line by line; a drag over a figure or blank area stays a plain rectangle). Text and
   Speech Bubble prompt for the caption right after the drag; Line draws as
   an arrow from where you start dragging to where you release; Ink and
   PolyLine both trace your actual freehand drag as a single pen stroke,
@@ -101,7 +103,8 @@ PDF VIEWING:
   "Change Color" recolors it (for the kinds this app can draw itself);
   "Change Line Weight" adjusts its stroke width (Square/Circle/Line/
   Polygon/Ink/PolyLine only); "Change Text Size" sets a Text block or
-  Speech Bubble's font size (10-24pt); Delete/Backspace (or the panel's "Delete
+  Speech Bubble's font size (10-24pt); "Toggle Border" turns a text block's box
+  outline on or off (Text is borderless, Boxed Text has an outline); Delete/Backspace (or the panel's "Delete
   Selected" button) removes it; Escape, or clicking empty page space,
   deselects without changing anything. With Draw mode off, drag a selected
   shape (one this app can draw itself) directly on the page to reposition
@@ -124,11 +127,8 @@ expressions via the Regex checkbox.
   the plain-text view does).
 • PDF search reports a real "Match X of Y (found on N pages)" count and
   steps through every individual occurrence, including several on the same
-  page, drawing an approximate highlight box directly on the page around
-  the current match. That box is estimated from the page's own text
-  layout, not an exact character lookup, so it can occasionally land a
-  little off on an unusual line — the status text is always accurate even
-  when the box isn't pixel-perfect.
+  page, drawing an exact highlight box directly on the page around the
+  current match (one box per line if it wraps).
 
 WINDOW MANAGEMENT:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -170,9 +170,7 @@ KNOWN LIMITATIONS:
   behaves correctly either way.
 • Text/Markdown find moves to each match but can't paint a visible
   highlight box around it — a limitation of the underlying text widgets,
-  not a missing feature. PDF find's own highlight box is an estimate, not
-  an exact character-position lookup, so it can occasionally miss on an
-  unusual line.
+  not a missing feature.
 
 MORE INFORMATION:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

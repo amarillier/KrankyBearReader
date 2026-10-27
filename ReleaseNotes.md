@@ -46,59 +46,42 @@
   has no coordinate model to translate and rewrite,
   so an already-saved foreign Stamp is permanently non-movable by this
   app, not just not-yet-supported.
-- A plain text block still shows a visible border, unlike Preview's own
-  borderless "Text" tool — tried making it borderless (both in the
-  preview and the real saved annotation) and reverted: MuPDF's own
-  rendering of a FreeText with no baked appearance stream draws a border
-  unconditionally, confirmed empirically to ignore the `/BS` border-width
-  entry regardless of its value. Preview gets its own borderless look by
-  baking a custom appearance stream with no border path in it at all —
-  real content-stream + font-resource authoring, a bigger effort than a
-  border-width parameter, not attempted yet.
-- Real text-snapped highlight drawing, like Preview/Acrobat's "select text
-  → highlight" — today's "Draw Highlight" (see Version 0.4.0) is a free
-  hand-drawn rectangle, not snapped to text, because go-fitz has no word/
-  line bounding-box API to select against. Would need either extending
-  go-fitz's own cgo bindings to walk MuPDF's stext char boxes (real
-  engineering, and has to cover both the cgo and purego backends), or
-  accepting line-level-only granularity some other way. Only
-  handleHighlightDrawn's geometry math would need to change for this, not
-  the panel/save plumbing (AddHighlight/SaveHighlights don't care how a
-  quad was produced).
-- Real PDF text search, phased: Phase 1 (document-wide match count and
-  true next/prev-occurrence stepping) shipped in 0.6.0; Phase 2 (an
-  approximate on-page highlight box for the current match) also shipped
-  in 0.6.0 — see its own NEW entry under that version. Not pixel-perfect
-  like Preview's own box: go-fitz's text extraction still has no
-  character/word coordinate API, so the box's horizontal position/width
-  is estimated from the matched line's own font size rather than looked
-  up exactly. Real hands-on testing on a multi-column PDF found this
-  estimate can occasionally land in the wrong column entirely on a long
-  line (not just be imprecise within the right one); recalibrated once
-  against two confirmed real cases (see CLAUDE.md) with a real
-  improvement. The box is also padded wider than the raw estimate (more
-  on the left, per direct user feedback) so small residual drift still
-  visually lands on the word rather than beside it — helps most real
-  cases, though a line with an unusually narrow-character-heavy prefix
-  can still land a little off. Still an estimate, not exact character
-  positions. A truly exact box would still need the same go-fitz
-  cgo-binding extension the item above (real text-snapped highlight
-  drawing) is blocked on — worth doing together if ever attempted. Per
-  direct user preference, the shape-work items above this take
-  precedence over picking this back up.
+- Auto-grow a freshly drawn Text block whose box is too small to show even
+  one line of text (seen once, not reproduced: a borderless block drawn tiny
+  showed nothing at all, so it was hard to find and resize). Size changes
+  already grow the box (`growFreeTextToFit`); doing the same at creation, with
+  a sensible minimum size, would cover it.
 - A visible highlight box for Text/Markdown find matches (Fyne's Entry/
   RichText widgets have no public API for painting a selection from code)
 
 
-## Version 0.8.1 - October 26, 2026
+## Version 0.8.1 - October 27, 2026
 
 ### ✨ NEW
+
+- Text-snapped markup: Highlight, Underline, Strikeout and Squiggly now snap
+  to the text under your drag, like selecting text in Preview or Acrobat —
+  drag from one word to another and every character in between is marked,
+  one band per line, even across several lines. A drag that doesn't start
+  and end on or near text (over a figure, or blank margin) still draws a
+  plain rectangle as before. Multi-line markup now saves in full (only the
+  first line used to be written).
+- Exact find highlight: the PDF search box now sits precisely on the matched
+  text, one box per line for a match that wraps, instead of the earlier
+  font-size estimate (which could land a little off, or in the wrong column).
+  The old estimate remains only as a fallback for a page with no text layer.
 
 - "Draw: Polygon": trace a freehand outline and it closes itself when you
   let go (a faint line shows where it will close while you draw), then is
   thinned to a sensible number of corners and saved as a real PDF Polygon.
 - Ink and PolyLine strokes that end close to where they began now snap shut
   onto the start point, so an almost-closed loop really is closed.
+- Text blocks can now be borderless or boxed. "Draw: Text" is borderless, like
+  Preview's own "Text" tool (just the text, in the chosen color); the new
+  "Draw: Boxed Text" adds an outline (both are also in the right-click Add
+  Shape menu). The Highlights panel's new "Toggle Border" switches a selected
+  text block either way, including ones already saved. A Speech Bubble keeps
+  its outline.
 - Changing a Text block or Speech Bubble's size now grows its box downward
   if the bigger text wouldn't fit (best effort; you can still resize it).
 

@@ -57,6 +57,32 @@ func fontSizeChanged(h *Highlight) bool {
 	return hasFontSize(h.Kind) && h.FontSize != h.origFontSize
 }
 
+// freeTextStyleChanged is fontSizeChanged plus a border change: both live in
+// fields a bare dict rewrite can't make visible over a baked /AP, so both
+// take the delete-and-recreate path.
+func freeTextStyleChanged(h *Highlight) bool {
+	return fontSizeChanged(h) || (hasFontSize(h.Kind) && h.Bordered != h.origBordered)
+}
+
+// freeTextBordered reports whether an existing FreeText draws a border: a
+// /CL (callout) always does, an explicit /BS decides by its width, and with no
+// /BS a baked /AP means the other app's own appearance (assumed borderless,
+// like Preview's Text tool) while no /AP means MuPDF's default 1pt border.
+func freeTextBordered(xr *model.XRefTable, objNr int) bool {
+	d, err := xr.DereferenceDict(*types.NewIndirectRef(objNr, 0))
+	if err != nil || d == nil {
+		return true
+	}
+	if _, ok := d["CL"]; ok {
+		return true
+	}
+	if _, ok := d["BS"]; ok {
+		return parseBorderWidth(xr, d, defaultShapeBorderWidthPt) > 0
+	}
+	_, hasAP := d["AP"]
+	return !hasAP
+}
+
 var daFontSizeRe = regexp.MustCompile(`([0-9]*\.?[0-9]+)\s+Tf`)
 
 // parseDAFontSize extracts the size from a /DA string such as
@@ -242,6 +268,18 @@ func applyFreeTextFontSize(ctx *model.Context, ref *types.IndirectRef, sizePt fl
 	}
 	da, _ := d["DA"].(types.StringLiteral)
 	d.Update("DA", types.StringLiteral(fmt.Sprintf("/Helv %g Tf%s", sizePt, string(da))))
+	return nil
+}
+
+// applyFreeTextNoBorder writes an explicit /BS << /W 0 >> on a borderless
+// text block. pdfcpu omits /BS at width 0, and an absent /BS means "1pt default"
+// to MuPDF, so the explicit zero has to be patched in after adding.
+func applyFreeTextNoBorder(ctx *model.Context, ref *types.IndirectRef) error {
+	d, err := ctx.XRefTable.DereferenceDict(*ref)
+	if err != nil || d == nil {
+		return fmt.Errorf("reading new FreeText annotation: %v", err)
+	}
+	d.Update("BS", types.Dict{"Type": types.Name("Border"), "W": types.Float(0), "S": types.Name("S")})
 	return nil
 }
 

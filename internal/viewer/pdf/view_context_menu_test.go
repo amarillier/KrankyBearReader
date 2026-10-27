@@ -98,7 +98,7 @@ func TestAddShapeAt_EveryQuickShapeKindAddsExactlyOne(t *testing.T) {
 
 	for _, kind := range kinds {
 		t.Run(kind, func(t *testing.T) {
-			if kind == "Text" || kind == "Speech Bubble" {
+			if kind == "Text" || kind == "Boxed Text" || kind == "Speech Bubble" {
 				t.Skip("defers creation to a caption dialog (promptForShapeText), not testable headlessly")
 			}
 			// Star/Hexagon have no dedicated PDF annotation subtype —

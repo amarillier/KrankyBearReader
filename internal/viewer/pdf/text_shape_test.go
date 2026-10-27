@@ -3,6 +3,7 @@ package pdf
 import (
 	"image"
 	"image/color"
+	"path/filepath"
 	"testing"
 
 	"golang.org/x/image/font"
@@ -88,7 +89,7 @@ func TestDrawWrappedText_NonEmptyTextPaintsSomethingInsideBounds(t *testing.T) {
 	}
 }
 
-// TestDrawFreeTextPreview_PlainTextBlockStillHasBorder confirms the
+// TestDrawFreeTextPreview_PlainTextBlockHasNoBorder confirms the
 // preview deliberately keeps a plain text block's border, even though it
 // doesn't match Preview's own borderless style — see
 // drawFreeTextPreview's own doc comment for why: MuPDF's real rendering
@@ -96,7 +97,7 @@ func TestDrawWrappedText_NonEmptyTextPaintsSomethingInsideBounds(t *testing.T) {
 // so a borderless preview would just be a different, more confusing
 // inconsistency (looks one way before Save, a different way after) than
 // staying consistent with what Save will actually produce.
-func TestDrawFreeTextPreview_PlainTextBlockStillHasBorder(t *testing.T) {
+func TestDrawFreeTextPreview_PlainTextBlockHasNoBorder(t *testing.T) {
 	img := image.NewRGBA(image.Rect(0, 0, 200, 100))
 	r := image.Rect(20, 20, 180, 80)
 	h := &Highlight{Kind: "FreeText", Contents: "hello", CalloutTip: nil}
@@ -110,8 +111,8 @@ func TestDrawFreeTextPreview_PlainTextBlockStillHasBorder(t *testing.T) {
 			break
 		}
 	}
-	if !borderPainted {
-		t.Errorf("expected a border painted along the top edge even for a plain text block")
+	if borderPainted {
+		t.Errorf("plain text block preview must not paint a border (Save writes /BS /W 0)")
 	}
 }
 
@@ -161,5 +162,130 @@ func TestDrawWrappedText_FirstLineAlwaysDrawsInTooShortBox(t *testing.T) {
 	}
 	if !painted {
 		t.Error("expected the first line painted even though the box is too short for it")
+	}
+}
+
+// TestSaveHighlights_PlainTextBlockRendersWithoutBorder renders the REAL
+// saved file with MuPDF: a plain text block must show no border, a speech
+// bubble must keep one. (An absent /BS is a 1pt border; only an explicit
+// /BS /W 0 removes it.)
+func TestSaveHighlights_PlainTextBlockRendersWithoutBorder(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "t.pdf")
+	writeTextPDF(t, path) // 300x200
+	doc, err := Prepare(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tip := [2]float64{5, 5}
+	doc.AddTextShape(1, [4]float64{20, 20, 140, 70}, nil, "plain", [3]float64{1, 0, 0})
+	doc.AddTextShape(1, [4]float64{160, 20, 290, 70}, &tip, "bubble", [3]float64{1, 0, 0})
+	if err := doc.SaveHighlights(path); err != nil {
+		t.Fatal(err)
+	}
+	doc.Close()
+	re, err := Prepare(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer re.Close()
+	img, err := re.RenderPage(1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Bottom edge of each box (PDF y=20), mid-width, below the text.
+	redAt := func(x, y int) bool {
+		r, g, b, _ := img.At(x, y).RGBA()
+		return r>>8 > 180 && g>>8 < 120 && b>>8 < 120
+	}
+	sc := float64(img.Bounds().Dx()) / 300 // page is 300pt wide
+	edgeY := int(float64(img.Bounds().Dy()) - 20*sc)
+	plainEdge, bubbleEdge := false, false
+	for dy := -3; dy <= 3; dy++ {
+		plainEdge = plainEdge || redAt(int(80*sc), edgeY+dy)
+		bubbleEdge = bubbleEdge || redAt(int(225*sc), edgeY+dy)
+	}
+	if plainEdge {
+		t.Errorf("plain text block rendered a border")
+	}
+	if !bubbleEdge {
+		t.Errorf("speech bubble lost its border")
+	}
+}
+
+// TestTextBlockBorderToggleRoundTrips draws a borderless and a boxed text
+// block, saves, reloads (Bordered must be read back from /BS), then toggles
+// both on the reloaded file, saves again, and checks the REAL MuPDF render
+// of each state at the bottom edge of the box.
+func TestTextBlockBorderToggleRoundTrips(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "t.pdf")
+	writeTextPDF(t, path) // 300x200
+	doc, err := Prepare(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc.AddTextShape(1, [4]float64{20, 20, 140, 70}, nil, "plain", [3]float64{1, 0, 0})
+	boxed := doc.AddTextShape(1, [4]float64{160, 20, 290, 70}, nil, "boxed", [3]float64{1, 0, 0})
+	boxed.Bordered = true
+	if err := doc.SaveHighlights(path); err != nil {
+		t.Fatal(err)
+	}
+	doc.Close()
+
+	edgeRed := func(d *Document, xPt float64) bool {
+		img, err := d.RenderPage(1, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sc := float64(img.Bounds().Dx()) / 300
+		y := int(float64(img.Bounds().Dy()) - 20*sc)
+		for dy := -3; dy <= 3; dy++ {
+			r, g, b, _ := img.At(int(xPt*sc), y+dy).RGBA()
+			if r>>8 > 180 && g>>8 < 120 && b>>8 < 120 {
+				return true
+			}
+		}
+		return false
+	}
+	byText := func(d *Document, text string) *Highlight {
+		for _, h := range d.Highlights {
+			if h.Kind == "FreeText" && h.Contents == text {
+				return h
+			}
+		}
+		t.Fatalf("no FreeText %q", text)
+		return nil
+	}
+
+	re, err := Prepare(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if byText(re, "plain").Bordered || !byText(re, "boxed").Bordered {
+		t.Fatalf("Bordered not read back: plain=%v boxed=%v", byText(re, "plain").Bordered, byText(re, "boxed").Bordered)
+	}
+	if edgeRed(re, 80) || !edgeRed(re, 225) {
+		t.Fatalf("saved render wrong: plain border=%v boxed border=%v", edgeRed(re, 80), edgeRed(re, 225))
+	}
+
+	re.SetHighlightBordered(byText(re, "plain"), true)
+	re.SetHighlightBordered(byText(re, "boxed"), false)
+	if !edgeRed(re, 80) || edgeRed(re, 225) {
+		t.Errorf("live preview after toggle wrong: plain border=%v boxed border=%v", edgeRed(re, 80), edgeRed(re, 225))
+	}
+	if err := re.SaveHighlights(path); err != nil {
+		t.Fatal(err)
+	}
+	re.Close()
+
+	again, err := Prepare(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer again.Close()
+	if !byText(again, "plain").Bordered || byText(again, "boxed").Bordered {
+		t.Errorf("toggle not persisted: plain=%v boxed=%v", byText(again, "plain").Bordered, byText(again, "boxed").Bordered)
+	}
+	if !edgeRed(again, 80) || edgeRed(again, 225) {
+		t.Errorf("saved render after toggle wrong: plain border=%v boxed border=%v", edgeRed(again, 80), edgeRed(again, 225))
 	}
 }

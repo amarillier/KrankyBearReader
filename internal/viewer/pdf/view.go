@@ -382,7 +382,7 @@ func (v *view) buildToolbar() fyne.CanvasObject {
 	drawOptions := []string{
 		"Draw: Off", "Draw: Highlight", "Draw: Underline", "Draw: Strikeout", "Draw: Squiggly",
 		"Draw: Square", "Draw: Circle", "Draw: Line",
-		"Draw: Star", "Draw: Hexagon", "Draw: Text", "Draw: Speech Bubble", "Draw: Ink", "Draw: PolyLine", "Draw: Polygon",
+		"Draw: Star", "Draw: Hexagon", "Draw: Text", "Draw: Boxed Text", "Draw: Speech Bubble", "Draw: Ink", "Draw: PolyLine", "Draw: Polygon",
 	}
 	drawSelect := widget.NewSelect(drawOptions, func(s string) {
 		kind := strings.TrimPrefix(s, "Draw: ")
@@ -511,7 +511,12 @@ func (v *view) buildFindBar() fyne.CanvasObject {
 			return
 		}
 		page := state.step(v.currentPage, dir)
-		if rect, ok := v.doc.SearchMatchRect(page, query, regexCheck.Checked, state.occurrenceIndexOnPage()); ok {
+		// Exact per-character boxes first; the font-size estimate only if
+		// the page has no usable text layer or the match can't be located.
+		occ := state.occurrenceIndexOnPage()
+		if rects, ok := v.doc.SearchMatchRects(page, query, regexCheck.Checked, occ); ok {
+			v.doc.SetSearchHighlights(page, rects)
+		} else if rect, ok := v.doc.SearchMatchRect(page, query, regexCheck.Checked, occ); ok {
 			v.doc.SetSearchHighlight(page, rect)
 		} else {
 			v.doc.ClearSearchHighlight()

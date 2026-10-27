@@ -101,6 +101,8 @@ func newHighlightsPanel(v *view) *highlightsPanel {
 
 	fontSizeBtn := widget.NewButton("Change Text Size", hp.changeSelectedFontSize)
 
+	borderBtn := widget.NewButton("Toggle Border", hp.toggleSelectedBorder)
+
 	deleteBtn := widget.NewButton("Delete Selected", hp.deleteSelected)
 	deleteBtn.Importance = widget.WarningImportance
 
@@ -114,7 +116,7 @@ func newHighlightsPanel(v *view) *highlightsPanel {
 	// PDF) is a VBox for exactly this reason: stacked, the panel's MinSize
 	// is only its single widest button, matching how TOC/Bookmarks already
 	// narrow down freely.
-	toolbar := container.NewVBox(editBtn, colorBtn, lineWidthBtn, fontSizeBtn, deleteBtn, saveBtn)
+	toolbar := container.NewVBox(editBtn, colorBtn, lineWidthBtn, fontSizeBtn, borderBtn, deleteBtn, saveBtn)
 
 	hp.container = container.NewBorder(toolbar, nil, nil, nil, hp.list)
 	return hp
@@ -308,6 +310,23 @@ func (hp *highlightsPanel) changeSelectedFontSize() {
 
 	d.Resize(fyne.NewSize(360, 180))
 	d.Show()
+}
+
+// toggleSelectedBorder turns a text block's box outline on or off. A speech
+// bubble is refused: its box is the bubble's own outline.
+func (hp *highlightsPanel) toggleSelectedBorder() {
+	h := hp.selected
+	if h == nil {
+		dialog.ShowInformation("No Selection", "Please select a text block to toggle its border", hp.v.win)
+		return
+	}
+	if !hasFontSize(h.Kind) || h.CalloutTip != nil {
+		dialog.ShowInformation("Not supported", "Only text blocks have a border you can toggle (a speech bubble's box is its outline).", hp.v.win)
+		return
+	}
+	hp.v.doc.SetHighlightBordered(h, !h.Bordered)
+	hp.notifyIfRenderIsDeferred(h, "border")
+	hp.deselect()
 }
 
 // deselect clears the currently-selected highlight, if any — the reverse

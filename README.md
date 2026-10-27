@@ -29,7 +29,8 @@ bug fixing and performance work.
     the panel), and a Highlights and Notes panel showing every annotation
     already in the file (e.g. from Preview or Acrobat) — painted directly
     onto the page in its own color, whatever its kind. Draw new
-    Highlight/Square/Circle/Line (arrow)/Star/Hexagon/Text block/Speech
+    Highlight/Square/Circle/Line (arrow)/Star/Hexagon/Text block (with or
+    without a border)/Speech
     Bubble annotations directly on the page (a toolbar dropdown picks the
     kind, then drag); click one on the page (or pick it from the panel) to
     select it, then Change Color or delete it (Delete/Backspace, or the
@@ -43,10 +44,8 @@ bug fixing and performance work.
   CSV filters rows, JSON/YAML/TOML/XML filters the tree, Text/Markdown jump
   between matches, and PDF reports a real "Match X of Y (found on N pages)"
   count and steps through every individual occurrence — including several
-  on the same page — drawing an approximate highlight box around the
-  current match directly on the page (estimated from the page's own text
-  layout, not a pixel-exact lookup, so it can occasionally land a little
-  off on an unusual line).
+  on the same page — drawing an exact highlight box around the
+  current match directly on the page.
 - **Sample Files** (Help menu) — a quick tour of every supported format
   except PDF (most people already have real PDFs on hand to try instead).
 - **Recent Files**, drag-and-drop, and command-line file arguments all open
@@ -109,9 +108,7 @@ Platform helpers: `compile-mac.sh`, `compile-win.sh`, `compile-linux.sh`, and
   behaves correctly either way.
 - Find in Text/Markdown views moves to each match but can't paint a visible
   highlight box around it (the underlying text widgets have no public API
-  for that). PDF find's own highlight box is an estimate based on the
-  page's text layout, not an exact character-position lookup, so it can
-  occasionally land a little off on an unusual line.
+  for that).
 
 ## License
 

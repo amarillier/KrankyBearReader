@@ -52,4 +52,4 @@ require (
 	golang.org/x/text v0.43.0 // indirect
 )
 
-replace github.com/gen2brain/go-fitz => github.com/amarillier/go-fitz v1.24.15-kbr.1
+replace github.com/gen2brain/go-fitz => github.com/amarillier/go-fitz v1.24.15-kbr.3

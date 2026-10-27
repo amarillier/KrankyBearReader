@@ -6,8 +6,8 @@ github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
 github.com/FyshOS/fancyfs v0.0.1 h1:kgvm7VvwOMLkYTqSflplp62SlMVWQ2uAoHw9CXwXHYg=
 github.com/FyshOS/fancyfs v0.0.1/go.mod h1:S5SHVz/5R72iCXOxCqdcyTPSlg3JxNd0gaHyGBSrY8A=
-github.com/amarillier/go-fitz v1.24.15-kbr.1 h1:YODXlb+B8DsUB2N2TLnsclKCcHDzaAMqXxoWB7l0jK0=
-github.com/amarillier/go-fitz v1.24.15-kbr.1/go.mod h1:SftkiVbTHqF141DuiLwBBM65zP7ig6AVDQpf2WlHamo=
+github.com/amarillier/go-fitz v1.24.15-kbr.3 h1:w7Gv+Z/Gy7n+UqGadRawPxyIumFX+IFnYYI25Qk42+U=
+github.com/amarillier/go-fitz v1.24.15-kbr.3/go.mod h1:SftkiVbTHqF141DuiLwBBM65zP7ig6AVDQpf2WlHamo=
 github.com/amarillier/go-update-checker v0.0.5 h1:84m0jWvaiF+R4MW/onWcOvQZoxVAY0p3AnHQ+G/d3kY=
 github.com/amarillier/go-update-checker v0.0.5/go.mod h1:/56MLKmTp0GlEUQQxV+lLkWl16pYf+O+7bMshoaDE9E=
 github.com/anthonynsimon/bild v0.14.0 h1:IFRkmKdNdqmexXHfEU7rPlAmdUZ8BDZEGtGHDnGWync=

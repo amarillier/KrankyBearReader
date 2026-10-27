@@ -351,13 +351,11 @@ func TestSaveHighlights_MarkupShapeAddRoundTrips(t *testing.T) {
 
 // TestSaveHighlights_PolygonAndFreeTextRoundTrips covers the two newest
 // TestNewAnnotationForShape_FreeTextAlwaysHasBorderWidth confirms both a
-// plain text block and a speech bubble are authored with the same
-// defaultShapeBorderWidthPt — deliberately NOT 0 for a plain text block,
-// even though that would better match Preview's own borderless style,
-// because it was confirmed empirically to have no effect on MuPDF's own
-// rendering (it draws a border regardless of /BS) — see
-// newAnnotationForShape's own doc comment on why that idea was tried and
-// reverted, not just never attempted.
+// plain text block and a speech bubble are AUTHORED with the same
+// defaultShapeBorderWidthPt. pdfcpu omits /BS at width 0 (which MuPDF reads
+// as a 1pt default), so a plain block's real borderlessness is patched in
+// by SaveHighlights (applyFreeTextNoBorder) — see
+// TestSaveHighlights_PlainTextBlockRendersWithoutBorder.
 func TestNewAnnotationForShape_FreeTextAlwaysHasBorderWidth(t *testing.T) {
 	plain := &Highlight{Kind: "FreeText", Rect: [4]float64{0, 0, 100, 50}, Contents: "hi"}
 	ann, ok := newAnnotationForShape(plain).(model.FreeTextAnnotation)
