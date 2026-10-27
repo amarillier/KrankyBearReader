@@ -242,3 +242,21 @@ func TestSetHighlightFontSize_GrowsBoxAndPersists(t *testing.T) {
 		t.Errorf("grown box not persisted: %v", got)
 	}
 }
+
+func TestAddTextShape_TinyBoxIsEnlargedToBeVisible(t *testing.T) {
+	d := &Document{cache: newPageCache(pageCacheCapacity), thumbs: newPageCache(pageCacheCapacity)}
+	h := d.AddTextShape(0, [4]float64{100, 500, 104, 503}, nil, "hello world", [3]float64{0, 0, 0})
+	if w := h.Rect[2] - h.Rect[0]; w < minTextBoxWidthPt {
+		t.Errorf("width %v below minimum", w)
+	}
+	if ht := h.Rect[3] - h.Rect[1]; ht < minTextBoxHeightPt {
+		t.Errorf("height %v below minimum", ht)
+	}
+	if h.Rect[0] != 100 || h.Rect[3] != 503 {
+		t.Errorf("top-left corner moved: %v", h.Rect)
+	}
+	big := d.AddTextShape(0, [4]float64{100, 400, 300, 480}, nil, "hi", [3]float64{0, 0, 0})
+	if big.Rect != [4]float64{100, 400, 300, 480} {
+		t.Errorf("roomy box changed: %v", big.Rect)
+	}
+}

@@ -276,6 +276,10 @@ func (v *view) build() fyne.CanvasObject {
 	v.currentDrawer.OnFreehandDrawn = func(points []fyne.Position, size fyne.Size) {
 		v.handleFreehandDrawn(v.currentPage, points, size)
 	}
+	v.currentDrawer.OnClickPolyline = func(points []fyne.Position, size fyne.Size, closed bool) {
+		v.handleClickPolyline(v.currentPage, points, size, closed)
+	}
+	v.currentDrawer.OnClickBegin = func() { v.cancelClickPolylineExcept(v.currentDrawer) }
 	v.imageScroll = container.NewScroll(v.currentDrawer)
 	v.imageScroll.OnScrolled = func(_ fyne.Position) {
 		if v.continuous {
@@ -363,9 +367,8 @@ func (v *view) buildToolbar() fyne.CanvasObject {
 	// every sampled point along the drag becomes the stroke, not just its
 	// start/end (see highlightDrawer's own FreehandMode/OnFreehandDrawn
 	// and handleFreehandDrawn) — both use the identical capture, just
-	// saved under a different PDF subtype (/Ink vs /PolyLine); a real
-	// click-vertex-then-finish PolyLine tool is a bigger, separate effort
-	// (see ReleaseNotes' Future ideas), not what this is. "Off" by default
+	// saved under a different PDF subtype (/Ink vs /PolyLine). Connect
+	// Points is the click-each-vertex tool (see connectPointsKind). "Off" by default
 	// so a plain click-drag (which did nothing before Draw Highlight
 	// existed) still does nothing unless the user deliberately picks a
 	// shape.
@@ -382,7 +385,7 @@ func (v *view) buildToolbar() fyne.CanvasObject {
 	drawOptions := []string{
 		"Draw: Off", "Draw: Highlight", "Draw: Underline", "Draw: Strikeout", "Draw: Squiggly",
 		"Draw: Square", "Draw: Circle", "Draw: Line",
-		"Draw: Star", "Draw: Hexagon", "Draw: Text", "Draw: Boxed Text", "Draw: Speech Bubble", "Draw: Ink", "Draw: PolyLine", "Draw: Polygon",
+		"Draw: Star", "Draw: Hexagon", "Draw: Text", "Draw: Boxed Text", "Draw: Speech Bubble", "Draw: Ink", "Draw: PolyLine", "Draw: Polygon", "Draw: Connect Points",
 	}
 	drawSelect := widget.NewSelect(drawOptions, func(s string) {
 		kind := strings.TrimPrefix(s, "Draw: ")

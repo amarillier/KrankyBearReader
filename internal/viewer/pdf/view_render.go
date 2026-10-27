@@ -200,6 +200,7 @@ func (v *view) jumpToPageAndPosition(page int, frac float32) {
 	if page > v.doc.PageCount() {
 		page = v.doc.PageCount()
 	}
+	v.cancelClickPolyline()
 	v.setCurrentPage(page)
 	v.pageEntry.SetText(fmt.Sprintf("%d", page))
 
@@ -381,18 +382,91 @@ func (v *view) setDrawKind(kind string) {
 	enabled := kind != ""
 	freehand := isFreehandKind(kind)
 	closing := kind == "Polygon"
+	clicking := kind == connectPointsKind
+	v.cancelClickPolyline()
 	if v.currentDrawer != nil {
 		v.currentDrawer.Enabled = enabled
 		v.currentDrawer.FreehandMode = freehand
 		v.currentDrawer.ClosePreview = closing
+		v.currentDrawer.ClickMode = clicking
 	}
 	for _, d := range v.pageDrawers {
 		if d != nil {
 			d.Enabled = enabled
 			d.FreehandMode = freehand
 			d.ClosePreview = closing
+			d.ClickMode = clicking
 		}
 	}
+}
+
+// connectPointsKind is the Draw kind for the click-each-vertex tool: click to
+// place vertices, click the last one again or press Enter to finish a line,
+// click the first vertex to close it into a Polygon, Escape to cancel.
+const connectPointsKind = "Connect Points"
+
+// allDrawers lists every live page drawer (the single-page one and any
+// continuous-scroll ones).
+func (v *view) allDrawers() []*highlightDrawer {
+	var out []*highlightDrawer
+	if v.currentDrawer != nil {
+		out = append(out, v.currentDrawer)
+	}
+	for _, d := range v.pageDrawers {
+		if d != nil {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// cancelClickPolyline drops any click-vertex shape under construction.
+func (v *view) cancelClickPolyline() {
+	for _, d := range v.allDrawers() {
+		d.CancelClick()
+	}
+}
+
+// cancelClickPolylineExcept drops unfinished shapes on every drawer but keep.
+func (v *view) cancelClickPolylineExcept(keep *highlightDrawer) {
+	for _, d := range v.allDrawers() {
+		if d != keep {
+			d.CancelClick()
+		}
+	}
+}
+
+// finishClickPolyline finishes the open shape under construction (Enter),
+// reporting whether there was one to finish.
+func (v *view) finishClickPolyline() bool {
+	for _, d := range v.allDrawers() {
+		if d.HasClickPending() {
+			d.FinishClick(false)
+			return true
+		}
+	}
+	return false
+}
+
+// handleClickPolyline adds a finished click-vertex shape: a PolyLine, or a
+// Polygon when the user closed it by clicking back on the first vertex.
+func (v *view) handleClickPolyline(page int, points []fyne.Position, widgetSize fyne.Size, closed bool) {
+	pageW, pageH, err := v.doc.PageBoundsPt(page)
+	if err != nil {
+		return
+	}
+	pdfPoints := make([][2]float64, len(points))
+	for i, p := range points {
+		x, y := widgetPointToPDF(p, widgetSize, pageW, pageH)
+		pdfPoints[i] = [2]float64{x, y}
+	}
+	if closed {
+		v.doc.AddPolygonShape(page, pdfPoints, v.highlightColor, v.lineWidthPt)
+	} else {
+		v.doc.AddPolyLineShape(page, pdfPoints, v.highlightColor, v.lineWidthPt)
+	}
+	v.highlights.refreshList()
+	v.repaintPage(page)
 }
 
 // defaultArrowEndStyle is what a freshly-drawn "Line" shape gets: no
@@ -1173,6 +1247,11 @@ func (v *view) buildContinuousPages() {
 		drawer.Enabled = v.drawKind != ""
 		drawer.FreehandMode = isFreehandKind(v.drawKind)
 		drawer.ClosePreview = v.drawKind == "Polygon"
+		drawer.ClickMode = v.drawKind == connectPointsKind
+		drawer.OnClickPolyline = func(points []fyne.Position, size fyne.Size, closed bool) {
+			v.handleClickPolyline(page, points, size, closed)
+		}
+		drawer.OnClickBegin = func() { v.cancelClickPolylineExcept(drawer) }
 		drawer.TraceStyle = v.traceStyleFor(page)
 		drawer.OnDrawn = func(start, end fyne.Position, size fyne.Size) {
 			v.handleHighlightDrawn(page, start, end, size)
@@ -1381,6 +1460,22 @@ func (v *view) typedKey(ev *fyne.KeyEvent) {
 		// accidental move/edit), on top of delete's own confirm dialog.
 		// A no-op with nothing selected, same as deleteSelected's own
 		// guard above.
+		// Escape first abandons an unfinished click-vertex shape.
+		if hadPending := v.hasClickPending(); hadPending {
+			v.cancelClickPolyline()
+			return
+		}
 		v.highlights.deselect()
+	case fyne.KeyReturn, fyne.KeyEnter:
+		v.finishClickPolyline()
 	}
+}
+
+func (v *view) hasClickPending() bool {
+	for _, d := range v.allDrawers() {
+		if d.HasClickPending() {
+			return true
+		}
+	}
+	return false
 }

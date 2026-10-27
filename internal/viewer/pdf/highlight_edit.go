@@ -162,7 +162,10 @@ func (d *Document) AddPolyLineShape(page int, points [][2]float64, rgb [3]float6
 // runs; the returned Highlight has ObjNr == 0 until then, same as every
 // other Add* method.
 func (d *Document) AddTextShape(page int, rect [4]float64, calloutTip *[2]float64, caption string, rgb [3]float64) *Highlight {
-	return d.addShape(&Highlight{Page: page, Kind: "FreeText", Rect: rect, CalloutTip: calloutTip, Contents: caption, Color: rgb, FontSize: defaultFontSizePt, Bordered: calloutTip != nil})
+	h := &Highlight{Page: page, Kind: "FreeText", Rect: rect, CalloutTip: calloutTip, Contents: caption, Color: rgb, FontSize: defaultFontSizePt, Bordered: calloutTip != nil}
+	ensureMinTextBox(h)
+	growFreeTextToFit(h)
+	return d.addShape(h)
 }
 
 // DeleteHighlight removes h — geometry, color, caption, all of it —

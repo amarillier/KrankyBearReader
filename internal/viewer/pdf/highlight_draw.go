@@ -2,9 +2,11 @@ package pdf
 
 import (
 	"image/color"
+	"math"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
+	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/widget"
 )
 
@@ -108,6 +110,23 @@ type highlightDrawer struct {
 	// shape at all).
 	OnFreehandDrawn func(points []fyne.Position, widgetSize fyne.Size)
 
+	// ClickMode, while Enabled is also true, turns the drawer into a
+	// click-each-vertex tool (the "Connect Points" Draw kind): every tap adds
+	// a vertex and drags do nothing. Tapping the last vertex again (or Enter,
+	// see FinishClick) finishes an open line; tapping the first vertex of a
+	// 3+ vertex shape finishes it closed. OnClickPolyline receives the
+	// vertices in image-local space, like OnFreehandDrawn. OnClickBegin fires
+	// when the first vertex is placed, so the view can drop an unfinished
+	// shape on any other page's drawer.
+	ClickMode       bool
+	OnClickPolyline func(points []fyne.Position, widgetSize fyne.Size, closed bool)
+	OnClickBegin    func()
+
+	clickPts   []fyne.Position // vertices in this widget's outer space
+	clickLines []*canvas.Line  // placed segments
+	clickMarks []*canvas.Circle
+	rubber     *canvas.Line // from the last vertex to the pointer
+
 	dragging   bool
 	moving     bool
 	resizing   bool
@@ -188,6 +207,121 @@ func (d *highlightDrawer) updateCloseLine() {
 	}
 	d.closeLine.Position1, d.closeLine.Position2 = d.cur, d.path[0]
 	d.Refresh()
+}
+
+// clickSnapPx is how close (in this widget's units) a tap must land to the
+// first or last vertex to finish the shape rather than add another vertex.
+const clickSnapPx = 8
+
+// HasClickPending reports whether a click-vertex shape is under construction.
+func (d *highlightDrawer) HasClickPending() bool { return len(d.clickPts) > 0 }
+
+// clickAt handles one tap in ClickMode (pos in outer space).
+func (d *highlightDrawer) clickAt(pos fyne.Position) {
+	near := func(a, b fyne.Position) bool {
+		return math.Hypot(float64(a.X-b.X), float64(a.Y-b.Y)) <= clickSnapPx
+	}
+	n := len(d.clickPts)
+	if n > 0 {
+		if near(pos, d.clickPts[n-1]) {
+			if n >= 2 {
+				d.FinishClick(false)
+			}
+			return
+		}
+		if near(pos, d.clickPts[0]) {
+			if n >= 3 {
+				d.FinishClick(true)
+			}
+			return
+		}
+	} else if d.OnClickBegin != nil {
+		d.OnClickBegin()
+	}
+	col, w := d.traceStyle()
+	if n > 0 {
+		l := canvas.NewLine(col)
+		l.StrokeWidth = w
+		l.Position1, l.Position2 = d.clickPts[n-1], pos
+		d.clickLines = append(d.clickLines, l)
+	}
+	const r = 3.5
+	m := canvas.NewCircle(col)
+	m.Position1 = fyne.NewPos(pos.X-r, pos.Y-r)
+	m.Position2 = fyne.NewPos(pos.X+r, pos.Y+r)
+	d.clickMarks = append(d.clickMarks, m)
+	d.clickPts = append(d.clickPts, pos)
+	if d.rubber != nil {
+		d.rubber.Position1, d.rubber.Position2 = pos, pos
+	}
+	d.Refresh()
+}
+
+// FinishClick completes the shape under construction (needs 2 vertices, or 3
+// when closed), handing it to OnClickPolyline, and reports whether it did.
+// Either way the in-progress state is cleared.
+func (d *highlightDrawer) FinishClick(closed bool) bool {
+	pts := d.clickPts
+	ok := len(pts) >= 2 && (!closed || len(pts) >= 3) && d.OnClickPolyline != nil
+	var local []fyne.Position
+	var size fyne.Size
+	if ok {
+		local = make([]fyne.Position, len(pts))
+		for i, p := range pts {
+			local[i], size = d.imageLocalPos(p)
+		}
+	}
+	d.CancelClick()
+	if ok {
+		d.OnClickPolyline(local, size, closed)
+	}
+	return ok
+}
+
+// CancelClick discards any shape under construction.
+func (d *highlightDrawer) CancelClick() {
+	if len(d.clickPts) == 0 && d.rubber == nil {
+		return
+	}
+	d.clickPts, d.clickLines, d.clickMarks, d.rubber = nil, nil, nil, nil
+	d.Refresh()
+}
+
+// tap routes a tap (outer-space pos) to the click tool when active,
+// otherwise to OnTapped. Shared by Tapped and DragEnd's near-stationary
+// fallback, since Fyne can deliver a jittery click either way.
+func (d *highlightDrawer) tap(pos fyne.Position) {
+	if d.Enabled && d.ClickMode {
+		d.clickAt(pos)
+		return
+	}
+	if d.OnTapped != nil {
+		lp, size := d.imageLocalPos(pos)
+		d.OnTapped(lp, size)
+	}
+}
+
+// MouseIn/MouseMoved/MouseOut (desktop.Hoverable) drive the rubber-band line
+// from the last vertex to the pointer while a click shape is under construction.
+func (d *highlightDrawer) MouseIn(*desktop.MouseEvent) {}
+func (d *highlightDrawer) MouseMoved(e *desktop.MouseEvent) {
+	n := len(d.clickPts)
+	if !d.Enabled || !d.ClickMode || n == 0 {
+		return
+	}
+	if d.rubber == nil {
+		col, w := d.traceStyle()
+		d.rubber = canvas.NewLine(withAlpha(col, 140))
+		d.rubber.StrokeWidth = w
+	}
+	d.rubber.Position1, d.rubber.Position2 = d.clickPts[n-1], e.Position
+	d.Refresh()
+}
+func (d *highlightDrawer) MouseOut() {
+	if d.rubber != nil {
+		d.rubber = nil
+		d.Refresh()
+	}
 }
 
 func newHighlightDrawer(img *canvas.Image) *highlightDrawer {
@@ -373,11 +507,11 @@ func (d *highlightDrawer) DragEnd() {
 
 	dx, dy := br.X-tl.X, br.Y-tl.Y
 	if dx < minDragPts && dy < minDragPts {
-		if d.OnTapped != nil {
-			pos, size := d.imageLocalPos(d.cur)
-			d.OnTapped(pos, size)
-		}
+		d.tap(d.cur)
 		return
+	}
+	if d.Enabled && d.ClickMode {
+		return // a real drag does nothing in click-vertex mode
 	}
 	if wasResizing {
 		if d.OnResized != nil {
@@ -472,10 +606,7 @@ func (d *highlightDrawer) outerPos(pos fyne.Position) fyne.Position {
 // Tapped fires OnTapped — see its own doc comment for why this never
 // conflicts with a drag gesture.
 func (d *highlightDrawer) Tapped(e *fyne.PointEvent) {
-	if d.OnTapped != nil {
-		pos, size := d.imageLocalPos(e.Position)
-		d.OnTapped(pos, size)
-	}
+	d.tap(e.Position)
 }
 
 // TappedSecondary fires OnTappedSecondary, implementing fyne.SecondaryTappable
@@ -522,8 +653,17 @@ func (r *highlightDrawerRenderer) MinSize() fyne.Size { return r.d.image.MinSize
 // on a widget's own Refresh() not marking the canvas dirty.
 func (r *highlightDrawerRenderer) Refresh() { canvas.Refresh(r.d) }
 func (r *highlightDrawerRenderer) Objects() []fyne.CanvasObject {
-	objs := make([]fyne.CanvasObject, 0, 3+len(r.d.traceLines))
+	objs := make([]fyne.CanvasObject, 0, 3+len(r.d.traceLines)+len(r.d.clickLines)+len(r.d.clickMarks))
 	objs = append(objs, r.d.image, r.d.overlay)
+	for _, l := range r.d.clickLines {
+		objs = append(objs, l)
+	}
+	if r.d.rubber != nil {
+		objs = append(objs, r.d.rubber)
+	}
+	for _, m := range r.d.clickMarks {
+		objs = append(objs, m)
+	}
 	if r.d.closeLine != nil {
 		objs = append(objs, r.d.closeLine)
 	}

@@ -87,7 +87,7 @@ PDF VIEWING:
   Circle, Polygon, FreeText, Stamp, Ink, and more).
 • Draw: pick a kind from the toolbar's "Draw: ..." dropdown (Highlight,
   Underline, Strikeout, Squiggly, Square, Circle, Line, Star, Hexagon,
-  Text, Boxed Text, Speech Bubble, Ink, PolyLine), pick a line weight from the
+  Text, Boxed Text, Speech Bubble, Ink, PolyLine, Polygon, Connect Points), pick a line weight from the
   dropdown next to it (Square/Circle/Line/Polygon/Ink/PolyLine only —
   meaningless for the others), then drag on the page to add it
   (Highlight/Underline/Strikeout/Squiggly snap to the text you drag across,
@@ -97,7 +97,12 @@ PDF VIEWING:
   PolyLine both trace your actual freehand drag as a single pen stroke,
   not a rectangle (your stroke is traced live as you drag; one that ends
   near where it began snaps shut). Polygon is the same freehand drag but
-  always closes on release into a real closed shape.
+  always closes on release into a real closed shape. Connect Points is
+  click-to-place instead of a drag: click each vertex (a live line follows
+  your pointer), then click the last vertex again or press Enter to finish
+  a PolyLine, or click the first vertex to close it into a Polygon; Escape
+  cancels. A Text block drawn too small to read is enlarged to a minimum
+  size so it can't end up invisible.
 • Select and edit: click any highlight/shape directly on the page, or pick
   it from the panel's own list, to select it — shown with a blue outline.
   "Change Color" recolors it (for the kinds this app can draw itself);

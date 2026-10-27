@@ -298,6 +298,25 @@ func previewFace(sizePx float64) (font.Face, error) {
 	return opentype.NewFace(previewFont, &opentype.FaceOptions{Size: sizePx, DPI: 72})
 }
 
+// Smallest box a freshly drawn text block may have, in points: enough for a
+// few words at the default size, so a tiny drag (or a borderless block, which
+// has no outline to find) never ends up invisible and hard to grab.
+const (
+	minTextBoxWidthPt  = 60.0
+	minTextBoxHeightPt = 20.0
+)
+
+// ensureMinTextBox widens (rightward) and heightens (downward) h's box to the
+// minimum size, keeping its top-left corner where the user drew it.
+func ensureMinTextBox(h *Highlight) {
+	if w := h.Rect[2] - h.Rect[0]; w < minTextBoxWidthPt {
+		h.Rect[2] = h.Rect[0] + minTextBoxWidthPt
+	}
+	if ht := h.Rect[3] - h.Rect[1]; ht < minTextBoxHeightPt {
+		h.Rect[1] = h.Rect[3] - minTextBoxHeightPt
+	}
+}
+
 // growFreeTextToFit enlarges h's box DOWNWARD (the top edge stays put) when
 // its text, wrapped at the current width and size, needs more height than
 // the box has — best effort, from Go Regular's metrics rather than

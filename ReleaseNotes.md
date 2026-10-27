@@ -3,57 +3,26 @@
 ## Windows, Linux and MacOS multi-format document reader/viewer
 
 ## Future ideas:
-- Preview's drag-the-midpoint arrow-curving trick: matching whatever
-  non-standard representation Preview uses for an "edited" (curved) arrow,
-  reverse-engineered from a real file the way the Line/arrow geometry work
-  was once. Resize (0.8.0) covers straight endpoints only. Stamp/Caret
-  authoring and a real click-vertex PolyLine tool (below) remain
-  deliberately deferred.
-- A real click-vertex-then-finish PolyLine tool — click to place each
-  vertex, then some way to finish (double-click, Enter, Escape, or
-  clicking back near the start) — rather than today's PolyLine (0.7.0),
-  which deliberately reuses Ink's own freehand-drag capture verbatim
-  (every sampled point along a single continuous drag), saved under PDF's
-  distinct `/PolyLine` subtype instead of `/Ink`. That was a deliberate,
-  explicit scope choice (confirmed with the user rather than assumed):
-  a real multi-click vertex tool needs genuinely new interaction state (an
-  in-progress vertex list spanning multiple discrete clicks, some way to
-  show it mid-construction, and a finish/cancel gesture that doesn't
-  collide with existing click-to-select) — a bigger, separate effort than
-  anything else in this "additional shape work" push, while the freehand
-  version shipped using already-built, already-tested infrastructure.
-  Worth it if a real "connect the dots" PolyLine (deliberate straight
-  segments, not a dense freehand sample) is ever specifically wanted.
-- Stamp/Caret — the other annotation kinds this app still can't author
-  itself (Highlight/Square/Circle/Line/Polygon(Star,Hexagon)/FreeText(text
-  block, speech bubble)/Ink/PolyLine can, as of 0.7.0 — see their own NEW
-  entries) — no longer need their own geometry parsing to RENDER correctly
-  (see 0.5.0's "real MuPDF annotation rendering" note: MuPDF renders any
-  of them correctly, generically, the moment they're actually saved into
-  the file), and already support listing/click-select/delete via a
-  generic `/Rect`-based bounding box (0.5.0). Stamp has no fixed geometry
-  to author against at all (arbitrary vector art). Confirmed via real
-  hands-on testing (0.7.0's Move feature) that Stamp specifically is also
-  why a real Preview "Shapes" tool annotation — star, hexagon, speech
-  bubble, magnifier/loupe, all apparently authored by Preview as Stamp
-  regardless of their visual appearance — can't be dragged to a new
-  position at all (`canMoveHighlight` correctly refuses rather than
-  risking the same delete-with-nothing-to-put-back regression recoloring
-  a foreign Polygon once had). Unlike Ink/PolyLine/Caret (Ink and
-  PolyLine's own Move now confirmed working, 0.7.0), this isn't something
-  authoring support would ever fix
-  for MOVING an existing one specifically: Stamp's arbitrary vector art
-  has no coordinate model to translate and rewrite,
-  so an already-saved foreign Stamp is permanently non-movable by this
-  app, not just not-yet-supported.
-- Auto-grow a freshly drawn Text block whose box is too small to show even
-  one line of text (seen once, not reproduced: a borderless block drawn tiny
-  showed nothing at all, so it was hard to find and resize). Size changes
-  already grow the box (`growFreeTextToFit`); doing the same at creation, with
-  a sensible minimum size, would cover it.
-- A visible highlight box for Text/Markdown find matches (Fyne's Entry/
-  RichText widgets have no public API for painting a selection from code)
+- Preview-style arrow curving (dragging an arrow's midpoint): Preview stores an
+  edited arrow in a non-standard way, so this is not currently feasible.
+  Deferred, and maybe never.
+- Stamp / Caret annotations: Preview's shapes (star, speech bubble, loupe) are
+  Stamps made of arbitrary vector art, so this app can't author or move them.
+  Not currently feasible. Deferred, and maybe never.
 
+
+## Version 0.9.0 - October 27, 2026
+
+### ✨ NEW
+
+- Draw: Connect Points — a click-to-place PolyLine tool. Click each vertex
+  (a live line follows the pointer), then click the last vertex again or
+  press Enter to finish an open PolyLine, or click the first vertex to close
+  it into a Polygon. Escape cancels; changing the Draw kind or page also
+  drops an unfinished shape. The existing freehand PolyLine is unchanged.
+- A Text block drawn too small to hold any text (easy to do with a borderless
+  one, which has no outline to find) is now enlarged to a minimum size at
+  creation, and grown to fit its text, instead of being invisible.
 
 ## Version 0.8.1 - October 27, 2026
 
